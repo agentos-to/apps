@@ -1333,8 +1333,8 @@ async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
         "url": f"{BASE}/hz/wishlist/ls/{list_id}",
         "privacy": list_privacy,
         "listType": list_type,
+        "ordering_mode": "unordered",
         "itemCount": len(all_items),
-        "items": all_items,
     }
 
 

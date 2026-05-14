@@ -692,7 +692,9 @@ def _entry_from_direntry(entry):
 
     result = {
         "name": entry.name,
-        "shape": "folder" if is_dir else "file",
+        "shape": "list" if is_dir else "file",
+        "listType": "folder" if is_dir else None,
+        "ordering_mode": "unordered" if is_dir else None,
         "kind": "dir" if is_dir else ("symlink" if is_symlink else "file"),
         "path": entry.path,
         "size": st.st_size if not is_dir else None,
@@ -965,7 +967,9 @@ def _get_finder_favorites():
                 favorites.append({
                     "name": os.path.basename(resolved),
                     "path": resolved,
-                    "shape": "folder",
+                    "shape": "list",
+                    "listType": "folder",
+                    "ordering_mode": "unordered",
                 })
 
     return favorites
@@ -1042,7 +1046,9 @@ async def get_file_info(*, path, **_kwargs):
         "name": os.path.basename(resolved),
         "path": resolved,
         "kind": "dir" if is_dir else ("symlink" if is_symlink else "file"),
-        "shape": "folder" if is_dir else "file",
+        "shape": "list" if is_dir else "file",
+        "listType": "folder" if is_dir else None,
+        "ordering_mode": "unordered" if is_dir else None,
         "size": st.st_size,
         "sizeFormatted": _format_size(st.st_size),
         "sizeOnDisk": size_on_disk,
