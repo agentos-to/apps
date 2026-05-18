@@ -1,5 +1,7 @@
 ---
 id: health
+capabilities:
+  - http
 name: Health Records
 description: Parses on-disk lab reports into the health graph
 color: "#5BA88A"
@@ -9,6 +11,9 @@ test:
   import_lab_report:
     params:
       path: "/Users/joe/Documents/Wellness/Health Records/Test Results/Blood Panels/2024-12-05 Superpower panel.csv"
+  loinc_search:
+    params:
+      component: Glucose
 ---
 
 # Health Records
@@ -29,7 +34,19 @@ instead of duplicating.
 | Superpower panel CSV | header `Name,Category,Value,Unit,Range` | ✅ |
 | PDF lab reports (Quest, LabCorp, One Medical, older panels) | `pdftotext` | planned |
 
-**Scope.** This skill parses *structure* only. Anything that needs
-clinical judgment — is a finding a condition or a procedure, which
-SNOMED code applies — is the agent's job, not the skill's. That work
-stays in the health project's interpretive extraction.
+`loinc_search` resolves a biomarker to its LOINC code against the
+public `tx.fhir.org` terminology server — live, no auth, nothing
+hardcoded. There is no reliable *mechanical* name→code search (the
+everyday code drowns under hundreds of hits), so the split is: the
+**agent** translates the report's wording into LOINC axis terms
+("Total Cholesterol" → component `Cholesterol`, specimen `Ser/Plas`),
+and the **skill** runs the precise six-axis query. The chosen
+`loincCode` is then stamped on the biomarker node — each user's graph
+accumulates their own resolved biomarkers; nothing personal lives in
+the skill.
+
+**Scope.** This skill parses *structure* and runs *precise lookups* —
+it holds no biomarker knowledge and makes no clinical judgement.
+Translating wording to LOINC terms, and picking among unit variants,
+is the agent's job. Interpretive work (condition vs procedure, SNOMED)
+stays in the health project's extraction.

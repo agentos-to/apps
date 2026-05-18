@@ -11,10 +11,15 @@ in `_FORMATS` — the rest of the tool is format-agnostic.
 """
 
 import csv
+import json
 import os
 import re
 
-from agentos import returns, skill_error
+from agentos import client, returns, skill_error
+
+# tx.fhir.org — HL7's public FHIR terminology server, LOINC loaded, no
+# auth. Reached directly; `capabilities: [http]` in the readme grants it.
+LOINC_EXPAND = "https://tx.fhir.org/r4/ValueSet/$expand"
 
 
 # --- identity + value helpers ---------------------------------------------
@@ -198,3 +203,76 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
         observations.append(ob)
 
     return observations
+
+
+# --- LOINC resolution -----------------------------------------------------
+# A lab report names a biomarker in free wording ("Total Cholesterol",
+# "TSH"); the universal identity is its LOINC code. There is no reliable
+# mechanical name→code search — confirmed against the NLM API and the
+# tx.fhir.org text filter, both of which bury the everyday code under
+# hundreds of irrelevant hits. But the *precise* query — LOINC's six
+# axes — is exact. So the split is: the agent translates the report
+# wording into LOINC axis terms (its medical knowledge: "Total
+# Cholesterol" → component "Cholesterol", specimen "Ser/Plas"), and this
+# tool runs the precise query against the public terminology server.
+# No biomarker knowledge is hardcoded here — it works for any biomarker,
+# any user.
+
+def _loinc_valueset(component: str, system: str, scale: str) -> dict:
+    """An inline LOINC ValueSet filtered to one component (+ optional
+    system / scale), active codes only."""
+    flt = [{"property": "COMPONENT", "op": "=", "value": component},
+           {"property": "STATUS", "op": "=", "value": "ACTIVE"}]
+    if system:
+        flt.append({"property": "SYSTEM", "op": "=", "value": system})
+    if scale:
+        flt.append({"property": "SCALE_TYP", "op": "=", "value": scale})
+    return {"resourceType": "ValueSet",
+            "compose": {"include": [
+                {"system": "http://loinc.org", "filter": flt}]}}
+
+
+@returns({"component": "string", "narrowed": "boolean", "matches": "array"})
+async def loinc_search(component: str, specimen: str = "Ser/Plas",
+                       scale: str = "Qn", **params) -> dict:
+    """Resolve a biomarker to its LOINC code(s) via the public
+    tx.fhir.org FHIR terminology server (no auth, live).
+
+    Supply LOINC *axis* terms, not the lab report's wording — translate
+    first: "Total Cholesterol" → component "Cholesterol", specimen
+    "Ser/Plas"; "TSH" → component "Thyrotropin"; "HbA1c" → component
+    "Hemoglobin A1c", specimen "Bld". Returns the active LOINC codes for
+    that component — usually 1-3, differing by unit (Mass/volume vs
+    Moles/volume); pick the one matching the report's unit.
+
+    If the precise query finds nothing, it retries with the component
+    alone (`narrowed: false`) so you can see what LOINC actually calls
+    it and adjust.
+
+    Args:
+        component: LOINC Component term — "Glucose", "Cholesterol",
+                   "Hemoglobin A1c", "Ferritin", "Thyrotropin".
+        specimen:  LOINC System token — "Ser/Plas" (default; serum or
+                   plasma), "Bld" (whole blood — CBC, HbA1c), "Urine".
+        scale:     LOINC Scale — "Qn" quantitative (default), "Ord", "Nom".
+    """
+    async def _expand(vs: dict) -> list:
+        resp = await client.post(
+            LOINC_EXPAND, params={"count": 40}, json=vs,
+            headers={"Content-Type": "application/fhir+json",
+                     "Accept": "application/fhir+json"})
+        # The server content-negotiates on Accept — without it tx.fhir.org
+        # serves an HTML page. Parse the JSON body ourselves.
+        body = json.loads(resp.get("body") or "{}")
+        contains = body.get("expansion", {}).get("contains", [])
+        return [{"loincCode": c["code"], "display": c.get("display", "")}
+                for c in contains]
+
+    matches = await _expand(_loinc_valueset(component, specimen, scale))
+    narrowed = True
+    if not matches:
+        # component term may be right but specimen/scale off — broaden
+        matches = await _expand(_loinc_valueset(component, None, None))
+        narrowed = False
+
+    return {"component": component, "narrowed": narrowed, "matches": matches}
