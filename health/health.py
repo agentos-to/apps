@@ -241,13 +241,30 @@ async def loinc_search(component: str, specimen: str = "Ser/Plas",
     Supply LOINC *axis* terms, not the lab report's wording — translate
     first: "Total Cholesterol" → component "Cholesterol", specimen
     "Ser/Plas"; "TSH" → component "Thyrotropin"; "HbA1c" → component
-    "Hemoglobin A1c", specimen "Bld". Returns the active LOINC codes for
-    that component — usually 1-3, differing by unit (Mass/volume vs
-    Moles/volume); pick the one matching the report's unit.
+    "Hemoglobin A1c/Hemoglobin.total", specimen "Bld". Returns the
+    active LOINC codes for that component — usually 1-3, differing by
+    unit (Mass/volume vs Moles/volume); pick the one matching the
+    report's unit.
 
     If the precise query finds nothing, it retries with the component
     alone (`narrowed: false`) so you can see what LOINC actually calls
     it and adjust.
+
+    Gotcha — COMPONENT is an *exact* match on LOINC's component axis,
+    which is frequently NOT the everyday name. An empty result means
+    the component term is wrong, not that no code exists. Known
+    translations that bite (found unifying a real biomarker set):
+      · HbA1c %        → "Hemoglobin A1c/Hemoglobin.total"
+      · MCH / MCHC     → component "Hemoglobin", specimen "RBC"
+      · MPV            → component "Platelet"
+      · Vitamin B12    → "Cobalamins"
+      · Lipoprotein(a) → "Lipoprotein (little a)"
+      · HDL / LDL      → "Cholesterol.in HDL" / "Cholesterol.in LDL"
+    A handful resist every component string on tx.fhir.org — Hematocrit
+    (4544-3), MCV (787-2), RDW (788-0), and the "/100 leukocytes"
+    differential percentages (Neutrophils 770-8, Lymphocytes 736-9,
+    Monocytes 5905-5, Eosinophils 713-8, Basophils 706-2). For those
+    the agent supplies the code from medical knowledge directly.
 
     Args:
         component: LOINC Component term — "Glucose", "Cholesterol",
