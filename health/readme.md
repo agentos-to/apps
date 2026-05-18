@@ -32,7 +32,12 @@ instead of duplicating.
 | Format | Detect | Status |
 |---|---|---|
 | Superpower panel CSV | header `Name,Category,Value,Unit,Range` | ✅ |
-| PDF lab reports (Quest, LabCorp, One Medical, older panels) | `pdftotext` | planned |
+
+This skill ingests **text files only** — it has no PDF support and does
+not shell out. PDF lab reports (Quest, LabCorp, One Medical, older
+panels) wait on a future PDF→text *capability* skill the engine can
+route to; only then does a `*-pdf` format get added here. Until that
+exists, a PDF draw is a one-time import done outside the skill.
 
 `loinc_search` resolves a biomarker to its LOINC code against the
 public `tx.fhir.org` terminology server — live, no auth, nothing
