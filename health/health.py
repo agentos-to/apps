@@ -196,8 +196,16 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
             "measures": biomarker,
             "document": document,
         }
-        for k in ("value", "valueText", "unit", "refLow", "refHigh",
-                  "refText"):
+        # The unit is not its own field — it rides on each numeric val
+        # (the memex stores a unit alongside every val). value / refLow /
+        # refHigh carry it via the {value, unit} envelope; valueText and
+        # refText are unitless strings.
+        unit = r.get("unit")
+        for k in ("value", "refLow", "refHigh"):
+            v = r.get(k)
+            if v is not None:
+                ob[k] = {"value": v, "unit": unit} if unit else v
+        for k in ("valueText", "refText"):
             if r.get(k) is not None:
                 ob[k] = r[k]
         observations.append(ob)
