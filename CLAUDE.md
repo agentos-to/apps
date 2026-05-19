@@ -13,16 +13,16 @@ invent.*
 
 | Task | Read | Canonical example |
 |---|---|---|
-| Building any skill | [`skills/overview.md`](../docs/src/content/docs/skills/overview.md) | — |
-| Adding login / auth | [`skills/adding-login.md`](../docs/src/content/docs/skills/adding-login.md) | ABP, Exa, Goodreads |
-| Auth internals (cookies, tokens, providers) | [`skills/auth-flows.md`](../docs/src/content/docs/skills/auth-flows.md) | — |
-| Credential matchmaking (how `login` gets `{email,password}`) | [`skills/adding-login.md#the-three-credential-resolution-paths`](../docs/src/content/docs/skills/adding-login.md) | `abp.py::login` |
-| Multi-step flows (OTP / SMS / OAuth consent) | [`skills/auth-flows.md#multi-step-flows`](../docs/src/content/docs/skills/auth-flows.md) | `exa.py::send_login_code` / `verify_login_code` |
-| Reverse engineering an API | [`skills/reverse-engineering/`](../docs/src/content/docs/skills/reverse-engineering/) | `united/requirements.md` for endpoint inventory style |
-| Connections, auth types, `@connection` | [`skills/connections.md`](../docs/src/content/docs/skills/connections.md) | — |
-| Writing the `logout` tool | [`skills/adding-login.md#do-i-need-a-logout-tool`](../docs/src/content/docs/skills/adding-login.md) | `abp.py::logout` |
-| How auth resolution picks one cookie | [`architecture/auth-resolution.md`](../docs/src/content/docs/architecture/auth-resolution.md) | — |
-| Shapes (ontology) | `../docs/shapes/*.yaml` | — |
+| Building any skill | [`skills/overview.md`](../platform/docs/src/content/docs/skills/overview.md) | — |
+| Adding login / auth | [`skills/adding-login.md`](../platform/docs/src/content/docs/skills/adding-login.md) | ABP, Exa, Goodreads |
+| Auth internals (cookies, tokens, providers) | [`skills/auth-flows.md`](../platform/docs/src/content/docs/skills/auth-flows.md) | — |
+| Credential matchmaking (how `login` gets `{email,password}`) | [`skills/adding-login.md#the-three-credential-resolution-paths`](../platform/docs/src/content/docs/skills/adding-login.md) | `abp.py::login` |
+| Multi-step flows (OTP / SMS / OAuth consent) | [`skills/auth-flows.md#multi-step-flows`](../platform/docs/src/content/docs/skills/auth-flows.md) | `exa.py::send_login_code` / `verify_login_code` |
+| Reverse engineering an API | [`skills/reverse-engineering/`](../platform/docs/src/content/docs/skills/reverse-engineering/) | `united/requirements.md` for endpoint inventory style |
+| Connections, auth types, `@connection` | [`skills/connections.md`](../platform/docs/src/content/docs/skills/connections.md) | — |
+| Writing the `logout` tool | [`skills/adding-login.md#do-i-need-a-logout-tool`](../platform/docs/src/content/docs/skills/adding-login.md) | `abp.py::logout` |
+| How auth resolution picks one cookie | [`architecture/auth-resolution.md`](../platform/docs/src/content/docs/architecture/auth-resolution.md) | — |
+| Shapes (ontology) | `../platform/ontology/shapes/*.yaml` | — |
 
 ## Universal rules for this repo
 

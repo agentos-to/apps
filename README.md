@@ -3,7 +3,7 @@
 Skills — Python adapters that connect AgentOS to third-party services
 (GitHub, Google, iMessage, Brave, etc.) and expose agent-only tools
 (LLM, web search, file system). Written against the Python **Skills
-SDK** in the [`sdk-skills/`](../sdk-skills) sibling repo.
+SDK** at [`platform/sdk/python/`](../platform/sdk/python).
 
 [agentos.to](https://agentos.to) · [agentos.to/skills](https://agentos.to/skills/)
 
@@ -41,9 +41,9 @@ catalog — clone and you immediately see every skill.
 
 ```bash
 git clone https://github.com/agentos-to/skills
-git clone https://github.com/agentos-to/sdk-skills    # sibling repo
+git clone https://github.com/agentos-to/site platform   # contract + SDKs + docs
 cd skills
-pip install -e ../sdk-skills                  # ships the validator
+pip install -e ../platform/sdk/python         # ships the validator
 git config core.hooksPath ../bin/git-hooks    # pre-commit + code review
 ```
 
@@ -65,11 +65,9 @@ Full authoring guide at
 | Repo                                                       | Lang         | What |
 | ---------------------------------------------------------- | ------------ | ---- |
 | [`core`](https://github.com/agentos-to/core)               | Rust         | The engine, CLI, MCP server |
-| [`docs`](https://github.com/agentos-to/docs)               | Astro + YAML | Docs + shapes (ontology) — deploys to [agentos.to](https://agentos.to) |
+| [`platform`](https://github.com/agentos-to/site)           | Py·TS·Astro  | The contract — ontology, codegen, the Python + TypeScript SDKs, docs site → [agentos.to](https://agentos.to) |
 | **`skills`** (this repo)                                   | Python       | Skills — adapters for third-party services |
-| [`sdk-skills`](https://github.com/agentos-to/sdk-skills)   | Python       | Skills SDK — the `agentos` package |
 | [`apps`](https://github.com/agentos-to/apps)               | TypeScript   | Apps + React components |
-| [`sdk-apps`](https://github.com/agentos-to/sdk-apps)       | TypeScript   | Apps SDK — components + generated TS shapes |
 
 ## Contributing
 
