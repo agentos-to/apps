@@ -35,6 +35,23 @@ loop silently `break`s with empty results.
 to-read; `list_books` returns 0 for every shelf. HTML dumped to
 /tmp during debug showed `<title>Sign in</title>`.
 
+### Label leakage → ISBN-identity collapse (diagnosed 2026-05-19)
+
+When `/review/list/` *does* serve real HTML (authed, 200, all pages),
+`list_books` still returns **1 node** for a 25-book shelf. Cause:
+`_field_value` does `(val_el or td).text_content()`. Current Goodreads
+markup nests an empty `<div class="value">` for blank fields; an *empty*
+lxml element is **falsy** (lxml FutureWarning), so `val_el or td`
+discards the real `.value` div and falls back to `td`, whose text is the
+`<label>` — every book gets `isbn="isbn"`, `isbn13="isbn13"`. The `book`
+shape is `identity_any: [isbn13, isbn]`, so the engine sees 25 identical
+identities and collapses them to one node.
+
+**Fix.** Replace every `X or Y` lxml-element truthiness with explicit
+`X if X is not None else Y`. Better: stop parsing `/review/list/` HTML —
+read the shelf from the page's hydration state / GraphQL the way
+`public_graph.py` already reads book pages.
+
 ## Open work
 
 - **connections-as-http-clients** — move `waf/mode/accept` off call
