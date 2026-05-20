@@ -35,7 +35,6 @@ def _format_launch(launch: dict) -> dict:
                   else "failure" if launch.get("success") is False
                   else "upcoming" if launch.get("upcoming")
                   else "unknown",
-        "eventType": "launch",
         "content": launch.get("details"),
         "flightNumber": launch.get("flight_number"),
         "rocketId": launch.get("rocket"),
@@ -51,7 +50,7 @@ def _format_launch(launch: dict) -> dict:
 
 
 @test
-@returns("event[]")
+@returns("launch[]")
 async def list_upcoming(limit: int = 10, **params) -> list[dict]:
     """List upcoming SpaceX launches.
 
@@ -64,7 +63,7 @@ async def list_upcoming(limit: int = 10, **params) -> list[dict]:
 
 
 @test(params={'limit': 5})
-@returns("event[]")
+@returns("launch[]")
 async def list_past(limit: int = 10, **params) -> list[dict]:
     """List recent past SpaceX launches, newest first.
 
@@ -78,7 +77,7 @@ async def list_past(limit: int = 10, **params) -> list[dict]:
 
 
 @test(params={'id': '5eb87d46ffd86e000604b388'})
-@returns("event")
+@returns("launch")
 async def get_launch(id: str, **params) -> dict:
     """Get details for a specific SpaceX launch by ID.
 

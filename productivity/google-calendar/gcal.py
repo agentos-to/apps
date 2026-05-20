@@ -249,7 +249,7 @@ def _map_event(event):
         "involves": [_map_attendee(a) for a in attendees if not a.get("resource")],
         # Status & type (R4-R5)
         "status": event.get("status"),
-        "eventType": etype,
+        "meetingType": etype,
         "visibility": event.get("visibility"),
         "showAs": _derive_show_as(event),
         # Timestamps (R6)
