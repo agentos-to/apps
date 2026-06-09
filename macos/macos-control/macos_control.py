@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agentos import file_info, file_list, file_read, provides, returns, shell, test, timeout
+from agentos import file_info, file_list, file_read, provides, returns, shell, test, timeout, volume_transport
 
 
 APP_SYSTEM_PROFILER_SWIFT = r"""
@@ -691,6 +691,7 @@ def _entry_from_direntry(entry):
     is_symlink = entry.is_symlink()
 
     result = {
+        "id": entry.path,
         "name": entry.name,
         "shape": "list" if is_dir else "file",
         "listType": "folder" if is_dir else None,
@@ -1081,6 +1082,88 @@ async def get_file_info(*, path, **_kwargs):
             pass
 
     return result
+
+
+# ── Volume transport ──────────────────────────────────────────────────
+# The fixed three-verb interface the engine dispatches when this skill
+# serves a filesystem volume: `list_volumes` ANNOUNCES (boot + refresh;
+# entries upsert as volume nodes under My Computer), `list_contents` and
+# `read_node` SERVE a browse, reached by name on the announcing skill.
+# Node id == absolute path for the filesystem transport. Read-only by
+# construction — the write verbs don't exist. Contract:
+# core/_roadmap/p2/realms-transports/plan.md "The transport contract".
+
+TRANSPORT_PAGE_SIZE = 500
+
+
+@test(params={})
+@returns("volume[]")
+@provides(volume_transport)
+@timeout(15)
+async def list_volumes(**_kwargs):
+    """Announce mounted filesystem volumes — internal disk, DMGs, USB drives."""
+    out = []
+    for v in await _get_volumes():
+        out.append({
+            "name": v["name"],
+            "kind": "filesystem",
+            "address": v["path"],
+            "readOnly": bool(v.get("readOnly")),
+            "removable": bool(v.get("removable")),
+            "totalBytes": v.get("totalBytes"),
+            "freeBytes": v.get("freeBytes"),
+        })
+    return out
+
+
+@test(params={"id": "/etc"})
+@returns({"id": "string", "entries": "{'type': 'array', 'description': 'Typed child nodes (file and folder shapes), name-sorted, folders first'}", "count": "integer", "nextCursor": "string"})
+@timeout(15)
+async def list_contents(*, id=None, cursor=None, show_hidden=False, **_kwargs):
+    """Serve the children of a filesystem node — the transport's listing verb.
+
+    Args:
+        id: Node id — for the filesystem transport, the absolute path.
+        cursor: Opaque pagination cursor from a prior call's nextCursor.
+        show_hidden: Include dotfiles.
+    """
+    resolved = os.path.abspath(os.path.expanduser(id or "/"))
+    if not os.path.isdir(resolved):
+        raise ValueError(f"Not a directory: {resolved}")
+
+    entries = []
+    with os.scandir(resolved) as scanner:
+        for entry in scanner:
+            if not show_hidden and entry.name.startswith("."):
+                continue
+            item = _entry_from_direntry(entry)
+            if item:
+                entries.append(item)
+    entries.sort(key=SORT_KEYS["name"])
+
+    offset = int(cursor) if cursor else 0
+    page = entries[offset : offset + TRANSPORT_PAGE_SIZE]
+    next_cursor = offset + TRANSPORT_PAGE_SIZE
+    return {
+        "id": resolved,
+        "entries": page,
+        "count": len(entries),
+        "nextCursor": str(next_cursor) if next_cursor < len(entries) else None,
+    }
+
+
+@test(params={"id": "/etc/hosts"})
+@returns({"id": "string", "name": "string", "path": "string", "kind": "string", "size": "integer", "modified": "string", "mimeType": "string", "readOnly": "boolean"})
+@timeout(10)
+async def read_node(*, id, **_kwargs):
+    """Read one filesystem node's full detail — the transport's stat verb.
+
+    Args:
+        id: Node id — for the filesystem transport, the absolute path.
+    """
+    info = await get_file_info(path=id)
+    info["id"] = info["path"]
+    return info
 
 
 def _main():
