@@ -90,7 +90,7 @@ The session is a JWT stored in `next-auth.session-token` on `.exa.ai`:
 | Endpoint | Method | Returns |
 |----------|--------|---------|
 | `/api/auth/session` | GET | `{ user: { email, id, currentTeamId, hasCompletedNewAiOnboarding, teams }, expires }` |
-| `/api/get-api-keys` | GET | `{ apiKeys: [{ id, name, enabled, createdAt, rateLimit }] }` — **`id` IS the full API key** (UI masks it, API doesn't) |
+| `/api/get-api-keys` | GET | `{ apiKeys: [{ id, publicId, legacyBearerSecret, name, enabled, createdAt, rateLimit, … }] }` — the secret is **`legacyBearerSecret`**; `id` is the row UUID, `publicId` the display handle (neither authenticates) |
 | `/api/get-teams` | GET | `{ teams: [{ id, name, role, totalAppliedCreditsCents, usageLimit }] }` |
 | `/api/get-websets-billing` | GET | `{ hasAccess: bool }` |
 
@@ -145,14 +145,20 @@ Discovered 2026-03-21/22 via Playwright interactive sessions:
 
 ### Key discovery
 
-The `id` field in `GET /api/get-api-keys` is the full API key value in UUID format (e.g. `5bcbb3da-e415-44f1-8e57-10e92177f378`). The dashboard UI shows it masked (`5bcbb3******...`), but the API returns it unmasked. This means `get_api_keys` can extract and store keys directly — no need to capture them at creation time.
+The bearer secret lives in the `legacyBearerSecret` field of
+`GET /api/get-api-keys` (Exa renamed away from the old scheme where
+`id` was itself the key). `id` is now the row UUID and `publicId`
+the display handle — neither authenticates. `get_api_keys` stores
+the first enabled key carrying a secret; keys served without one
+are listed `storable: false`. `create_api_key` reads the same field
+from the creation response.
 
 ### Dashboard API endpoints
 
 | Endpoint | Returns |
 |----------|---------|
 | `GET /api/auth/session` | User info, team memberships |
-| `GET /api/get-api-keys` | API keys with **full values** in `id` field |
+| `GET /api/get-api-keys` | API keys — secret in `legacyBearerSecret` |
 | `GET /api/get-teams` | Rate limits, credits, usage, billing info |
 | `GET /api/service-api-keys?teamId=` | Service API keys (separate from regular keys) |
 | `GET /api/get-websets-billing` | Websets access flag |

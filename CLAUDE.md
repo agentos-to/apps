@@ -70,9 +70,17 @@ invent.*
 - **Restart the engine after Python changes:** not needed —
   Python workers hot-load. Only rebuild Rust (`./dev.sh restart`
   in `core/`) for engine changes.
-- **Credential store:** `~/.agentos/data/agentos.db` (SQLite).
-  Writes happen through `__secrets__` + `__cookie_delta__`
-  sidebands — never open the DB directly from a skill.
+- **Credential store:** the `credentials` table inside the user
+  vault `~/.agentos/users/<u>.db` (encrypted, key in macOS
+  Keychain). Writes happen through `__secrets__` + `__cookie_delta__`
+  sidebands — never open the DB directly from a skill. Sideband keys
+  are **camelCase** (`itemType`, `expiresAt`) — the engine rejects
+  snake_case.
+- **api-key connections are directly settable** — no login flow
+  needed: `agentos call skills '{"op":"connect","params":{"skill":
+  "<id>","key":"<secret>"}}'`. `skills.load` shows per-connection
+  auth state (`## Connections`), and an unauthed call returns
+  NEEDS_CREDENTIALS with the obtain-URL + the literal connect call.
 
 ## If a doc says "it depends"
 
