@@ -30,7 +30,7 @@ async def logo_url(*, domain: str, size: int = 128, format: str = "png",
         """
     token = params.get("auth", {}).get("key", "")
     u = _base_url(domain, token, size, format) + f"&theme={theme}"
-    return {"u": u}
+    return {"url": u}
 
 
 @returns({"url": "string"})
