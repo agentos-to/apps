@@ -372,7 +372,9 @@ async def get_api_keys(*, store: bool = True, **params) -> dict:
     data = resp["json"]
 
     keys = data.get("apiKeys", [])
-    enabled_keys = [k for k in keys if k.get("enabled")]
+    # The secret is `legacyBearerSecret`; `id` is the row UUID. Keys the
+    # endpoint returns without a secret can be listed but not stored.
+    storable = [k for k in keys if k.get("enabled") and k.get("legacyBearerSecret")]
 
     result = {
         "__result__": {
@@ -382,7 +384,7 @@ async def get_api_keys(*, store: bool = True, **params) -> dict:
                     "enabled": k["enabled"],
                     "createdAt": k["createdAt"],
                     "rateLimit": k.get("rateLimit"),
-                    "maskedKey": k["id"][:6] + "••••••••",
+                    "storable": bool(k.get("legacyBearerSecret")),
                 }
                 for k in keys
             ],
@@ -390,17 +392,18 @@ async def get_api_keys(*, store: bool = True, **params) -> dict:
         }
     }
 
-    if store and enabled_keys:
-        key = enabled_keys[0]
+    if store and storable:
+        key = storable[0]
+        secret = key["legacyBearerSecret"]
         result["__secrets__"] = [{
             "domain": "exa.ai",
             "identifier": email,
             "itemType": "api_key",
             "label": f"Exa API Key ({key['name']})",
             "source": "exa",
-            "value": {"key": key["id"]},
+            "value": {"key": secret},
             "metadata": {
-                "masked": {"key": key["id"][:6] + "••••••••"},
+                "masked": {"key": secret[:6] + "••••••••"},
                 "dashboardUrl": f"{DASHBOARD_BASE}/api-keys",
                 "keyName": key["name"],
             },
@@ -463,9 +466,12 @@ async def create_api_key(*, name: str = "agentOS", **params) -> dict:
     data = resp["json"]
 
     key_obj = data.get("apiKey") or {}
-    api_key = key_obj.get("id") if isinstance(key_obj, dict) else key_obj
+    # The secret lives in `legacyBearerSecret`; `id` is the row UUID and
+    # `publicId` the display handle — neither authenticates.
+    api_key = key_obj.get("legacyBearerSecret") if isinstance(key_obj, dict) else None
     if not api_key or not isinstance(api_key, str):
-        return {"__result__": {"error": "API key not found in creation response", "raw": data}}
+        return {"__result__": {"error": "legacyBearerSecret not found in creation response",
+                               "fields": sorted(key_obj.keys()) if isinstance(key_obj, dict) else []}}
 
     masked = api_key[:6] + "••••" + api_key[-4:]
     return {
