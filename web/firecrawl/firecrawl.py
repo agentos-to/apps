@@ -5,13 +5,13 @@ from agentos import connection, provides, returns, web_read, client
 
 connection(
     'api',
-    base_url='https://api.firecrawl.dev/v1',
+    base_url='https://api.firecrawl.dev/v2',
     auth={'type': 'api_key', 'header': {'Authorization': '"Bearer " + .auth.key'}},
     label='API Key',
     help_url='https://www.firecrawl.dev/app/api-keys')
 
 
-API_BASE = "https://api.firecrawl.dev/v1"
+API_BASE = "https://api.firecrawl.dev/v2"
 
 
 @returns("webpage")
@@ -24,7 +24,9 @@ async def read_webpage(*, url: str, wait_for_js: int = 0, timeout: int = 30000, 
         f"{API_BASE}/scrape",
         json={
             "url": url,
-            "formats": ["markdown"],
+            # branding carries the page's own favicon URL — the source
+            # tells us, we never derive it.
+            "formats": ["markdown", "branding"],
             "onlyMainContent": True,
             "waitFor": wait_for_js,
             "timeout": timeout,
@@ -38,6 +40,7 @@ async def read_webpage(*, url: str, wait_for_js: int = 0, timeout: int = 30000, 
         "content": data.get("markdown") or meta.get("description"),
         "url": meta.get("sourceURL") or meta.get("url") or url,
         "image": meta.get("ogImage") or meta.get("image") or meta.get("og:image"),
+        "favicon": ((data.get("branding") or {}).get("images") or {}).get("favicon"),
         "author": meta.get("author") or meta.get("article:author"),
         "published": (
             meta.get("publishedTime")

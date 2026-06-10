@@ -506,7 +506,8 @@ def _map_result(r: dict) -> dict:
         "name": r.get("title"),
         "content": text,
         "url": r.get("url"),
-        "image": r.get("image") or r.get("favicon"),
+        "image": r.get("image"),
+        "favicon": r.get("favicon"),
         "author": r.get("author"),
         "published": r.get("publishedDate"),
     }
