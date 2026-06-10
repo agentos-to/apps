@@ -822,7 +822,6 @@ async def _get_volumes():
 
                 volumes.append({
                     "name": vol_name,
-                    "shape": "volume",
                     "path": mount_point,
                     "totalBytes": total_bytes,
                     "freeBytes": free_bytes,
@@ -868,7 +867,6 @@ def _get_volumes_fallback():
         sv = os.statvfs("/")
         volumes.append({
             "name": "Macintosh HD",
-            "shape": "volume",
             "path": "/",
             "totalBytes": sv.f_blocks * sv.f_frsize,
             "freeBytes": sv.f_bavail * sv.f_frsize,
@@ -892,7 +890,6 @@ def _get_volumes_fallback():
                 sv = os.statvfs(mount)
                 volumes.append({
                     "name": name,
-                    "shape": "volume",
                     "path": mount,
                     "totalBytes": sv.f_blocks * sv.f_frsize,
                     "freeBytes": sv.f_bavail * sv.f_frsize,
@@ -1097,11 +1094,19 @@ TRANSPORT_PAGE_SIZE = 500
 
 
 @test(params={})
-@returns("volume[]")
+@returns({"volumes": "{'type': 'array', 'description': 'Transport announce rows: name, kind, address, capacity'}", "count": "integer"})
 @provides(volume_transport)
 @timeout(15)
 async def list_volumes(**_kwargs):
-    """Announce mounted filesystem volumes — internal disk, DMGs, USB drives."""
+    """Announce mounted filesystem volumes — internal disk, DMGs, USB drives.
+
+    Deliberately NOT @returns("volume[]"): these rows are transport
+    announce data, and the engine's reconcile
+    (`transports::discover_transport_volumes`) is the ONLY writer of
+    `volume` nodes — into the System mount registry. A shape contract
+    here would make a remembered agent call duplicate the registry row
+    into the user's home graph.
+    """
     out = []
     for v in await _get_volumes():
         out.append({
@@ -1113,7 +1118,7 @@ async def list_volumes(**_kwargs):
             "totalBytes": v.get("totalBytes"),
             "freeBytes": v.get("freeBytes"),
         })
-    return out
+    return {"volumes": out, "count": len(out)}
 
 
 @test(params={"id": "/etc"})
