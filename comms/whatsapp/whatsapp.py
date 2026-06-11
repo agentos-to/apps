@@ -51,7 +51,14 @@ const { Chat, Msg, Contact } = C;
 """
 
 # Shape mappers + chat resolution, shared by most payloads.
+#
+# Sentinel-proofing: unset `__x_` model fields are NOT undefined — they
+# are truthy placeholder objects ({sentinel: 'DEFAULT VALUE PLACEHOLDER'}).
+# Never branch on truthiness of a model field: string fields go through
+# str(), numbers through Number.isFinite/isInteger, booleans compare
+# `=== true`.
 _HELPERS = """
+const str = (v) => typeof v === 'string' ? v : '';
 const jidPhone = (jid) => {
   if (!jid) return null;
   const [num, host] = jid.split('@');
@@ -63,8 +70,8 @@ const account = (jid, displayName) => {
   if (displayName) acct.display_name = displayName;
   return acct;
 };
-const iso = (t) => t ? new Date(t * 1000).toISOString() : null;
-const chatName = (c) => c.__x_name || c.__x_formattedTitle || '';
+const iso = (t) => Number.isFinite(t) ? new Date(t * 1000).toISOString() : null;
+const chatName = (c) => str(c.__x_name) || str(c.__x_formattedTitle);
 const mapChat = (c) => {
   const jid = c.__x_id?._serialized || '';
   const out = {
@@ -72,8 +79,8 @@ const mapChat = (c) => {
     name: chatName(c),
     published: iso(c.__x_t),
     isGroup: jid.endsWith('@g.us'),
-    isArchived: !!c.__x_archive,
-    unreadCount: c.__x_unreadCount ?? 0,
+    isArchived: c.__x_archive === true,
+    unreadCount: Number.isInteger(c.__x_unreadCount) ? c.__x_unreadCount : 0,
   };
   if (!out.isGroup && jid) {
     const acct = account(jid, out.name);
@@ -82,24 +89,25 @@ const mapChat = (c) => {
   return out;
 };
 const msgBody = (m) => {
-  let body = m.__x_body || '';
+  // For media, __x_body holds the preview thumbnail (base64), never
+  // text — the caption is a media message's only text.
+  let body = m.__x_type === 'chat' ? str(m.__x_body) : str(m.__x_caption);
   if (!body && m.__x_richResponse?.fragments) {
     body = m.__x_richResponse.fragments
       .filter(f => f.type === 'Text').map(f => f.text).join('\\n');
   }
-  if (!body && m.__x_caption) body = m.__x_caption;
   return body;
 };
 const mapMsg = (m) => {
   const chatId = m.__x_id?.remote?._serialized || '';
-  const isOutgoing = !!m.__x_id?.fromMe;
+  const isOutgoing = m.__x_id?.fromMe === true;
   const out = {
     id: m.__x_id?._serialized || '',
     content: msgBody(m),
     published: iso(m.__x_t),
     conversationId: chatId,
     isOutgoing,
-    type: m.__x_type || 'chat',
+    type: str(m.__x_type) || 'chat',
   };
   const c = Chat.get(chatId);
   if (c) out.name = chatName(c);
@@ -107,13 +115,13 @@ const mapMsg = (m) => {
     out.author = 'Me';
   } else {
     const sender = m.__x_senderObj;
-    const senderName = sender?.__x_name || sender?.__x_pushname || m.__x_notifyName || null;
+    const senderName = str(sender?.__x_name) || str(sender?.__x_pushname) || str(m.__x_notifyName) || null;
     if (senderName) out.author = senderName;
-    const senderJid = (m.__x_author || m.__x_from)?._serialized || null;
+    const senderJid = m.__x_author?._serialized || m.__x_from?._serialized || null;
     const acct = account(senderJid, senderName);
     if (acct) out.from = acct;
   }
-  if (m.__x_star) out.isStarred = true;
+  if (m.__x_star === true) out.isStarred = true;
   return out;
 };
 const findChat = (ref) => {
@@ -163,6 +171,11 @@ async def _eval(body: str, *, wait_ms: int = 20000, timeout_s: int = 45):
             return skill_error(
                 f"No match for {value.get('ref')!r} ({value.get('what', 'item')}).",
                 code="NotFound",
+            )
+        if code == "send_failed":
+            return skill_error(
+                f"WhatsApp did not accept the message: {value.get('what')}",
+                code="SendFailed",
             )
         return skill_error(f"WhatsApp payload error: {code}", code="PayloadError")
 
@@ -379,24 +392,56 @@ async def list_persons(*, conversation_id=None, limit=200, **params):
 # ──────────────────────────────────────────────────────────────────────
 
 
-@returns({"status": "string", "conversationId": "string", "conversationName": "string"})
+@returns("message")
 @timeout(60)
 async def send_message(*, to, text, **params):
-    """Send a WhatsApp message.
+    """Send a WhatsApp message; returns the sent message entity.
 
     Args:
         to: Chat JID or contact/group name substring.
         text: Message text to send.
     """
+    # A minimal {body, type} dict no longer sends — WhatsApp's model layer
+    # builds an empty husk from it, addAndSendMsgToChat resolves anyway,
+    # and the inner send promise rejects out of sight. Build the full
+    # message the way whatsapp-web.js does, and await BOTH promises:
+    # addAndSendMsgToChat resolves to [msg, sendPromise], and only the
+    # inner promise carries wire-level success/failure.
     return await _eval(f"""
     const chat = findChat({json.dumps(to)});
     if (!chat) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(to)} }};
     const {{ addAndSendMsgToChat }} = window.require('WAWebSendMsgChatAction');
-    await addAndSendMsgToChat(chat, {{ body: {json.dumps(text)}, type: 'chat' }});
+    const mk = window.require('WAWebMsgKey');
+    const key = mk.fromString('true_' + chat.__x_id._serialized + '_' + (await mk.newId()) + '_out');
+    const [, sendPromise] = await addAndSendMsgToChat(chat, {{
+      id: key,
+      body: {json.dumps(text)},
+      type: 'chat',
+      t: Math.floor(Date.now() / 1000),
+      from: me,
+      to: chat.__x_id,
+      self: 'out',
+      ack: 0,
+      isNewMsg: true,
+      local: true,
+    }});
+    const result = await sendPromise;
+    if (result?.messageSendResult !== 'OK') {{
+      return {{ __error: 'send_failed', what: JSON.stringify(result ?? null) }};
+    }}
+    // The tuple's msg element is a detached husk; the live model lands in
+    // the chat's own collection under the key we minted.
+    const sent = chat.msgs.getModelsArray().find(m => m.__x_id?._serialized === key._serialized);
+    if (sent) return mapMsg(sent);
     return {{
-      status: 'sent',
-      conversationId: chat.__x_id?._serialized || '',
-      conversationName: chatName(chat),
+      id: key._serialized,
+      content: {json.dumps(text)},
+      published: new Date().toISOString(),
+      conversationId: chat.__x_id._serialized,
+      isOutgoing: true,
+      type: 'chat',
+      name: chatName(chat),
+      author: 'Me',
     }};
     """)
 
@@ -421,7 +466,7 @@ _WATCH_HOOK = """
       %(helpers)s
       Msg.on('add', (m) => {
         try {
-          if (!m.__x_isNewMsg) return;
+          if (m.__x_isNewMsg !== true) return;
           const entity = mapMsg(m);
           entity.__shape__ = 'message';
           console.log(%(marker)s + JSON.stringify(entity));
@@ -438,12 +483,13 @@ _WATCH_HOOK = """
 async def watch(**params):
     """Stream new WhatsApp messages into the graph in real time.
 
-    Installs a hook on the live session (persists across page reloads);
-    each incoming or outgoing message lands in the graph as a `message`
-    entity the moment WhatsApp receives it — observers (SSE) fire as
-    with any other graph write. Idempotent: safe to call repeatedly.
-    Stops when the browser session ends (call again after an engine or
-    browser restart).
+    Installs a hook on the live session; each incoming or outgoing
+    message lands in the graph as a `message` entity the moment WhatsApp
+    receives it — observers (SSE) fire as with any other graph write.
+    The subscription is a standing intent in the engine: it survives
+    page reloads, session drops, and browser restarts (the engine
+    reconnects with backoff). Idempotent: safe to call repeatedly.
+    Only an engine restart clears it — re-arm after one.
     """
     hook = _WATCH_HOOK % {
         "helpers": _HELPERS,
@@ -463,6 +509,11 @@ async def watch(**params):
 async def send_reaction(*, chat, emoji, **params):
     """React to the most recent message in a chat with an emoji.
 
+    Reports `status: dispatched`, not `sent`: the reaction call is the
+    same one whatsapp-web.js uses, but WhatsApp Web gives a headless tab
+    no client-side echo to confirm delivery against — a phone is the
+    only ground truth.
+
     Args:
         chat: Chat JID or name substring.
         emoji: Any Unicode emoji (e.g. 🚀).
@@ -470,15 +521,16 @@ async def send_reaction(*, chat, emoji, **params):
     return await _eval(f"""
     const target = findChat({json.dumps(chat)});
     if (!target) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(chat)} }};
-    const chatId = target.__x_id?._serialized;
-    const lastMsg = Msg.getModelsArray()
-      .filter(m => (m.__x_id?.remote?._serialized || '') === chatId)
-      .sort((a, b) => (b.__x_t || 0) - (a.__x_t || 0))[0];
+    // The chat's own collection, not the global Msg one — in a headless
+    // tab the global collection only sees loaded/synced messages.
+    const lastMsg = target.msgs.getModelsArray()
+      .slice()
+      .sort((a, b) => (Number.isFinite(b.__x_t) ? b.__x_t : 0) - (Number.isFinite(a.__x_t) ? a.__x_t : 0))[0];
     if (!lastMsg) return {{ __error: 'not_found', what: 'message', ref: 'last message in chat' }};
     const {{ sendReactionToMsg }} = window.require('WAWebSendReactionMsgAction');
     await sendReactionToMsg(lastMsg, {json.dumps(emoji)});
     return {{
-      status: 'sent',
+      status: 'dispatched',
       reactedTo: msgBody(lastMsg).substring(0, 80),
       conversationName: chatName(target),
     }};

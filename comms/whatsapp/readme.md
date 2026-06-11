@@ -52,9 +52,21 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
 - First op after an engine restart is slow (~10-30s): browser launch + page
   load + Store init. Warm ops run in well under a second.
 - Media messages map with `type` (`image`, `video`, `ptt`, …) and use the
-  caption as `content`; media payloads themselves are not downloaded.
+  caption as `content` (never the preview thumbnail WhatsApp stores in the
+  body field); media payloads themselves are not downloaded.
 - Meta AI responses (`rich_response` type) have their text extracted from
   response fragments automatically.
+- `send_message` returns the sent message entity (same shape as
+  `list_messages` rows) once WhatsApp's server acks the send — a failed
+  send is a `SendFailed` error, never a silent success.
+- `send_reaction` reports `dispatched`, not delivered: WhatsApp Web gives
+  a headless tab no client-side echo for reactions. Check a phone if
+  delivery matters.
+- `watch` survives page reloads, session drops, and browser restarts (the
+  engine re-installs the hook and reconnects with backoff). Only an engine
+  restart clears it — re-arm with one `watch` call.
+- Chats are `@lid`-keyed (WhatsApp's post-2026 chat ids); groups stay
+  `@g.us`. `list_persons` resolves LIDs to names + phone JIDs via Contacts.
 
 ## Entity Model
 
@@ -70,8 +82,24 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
 Payloads use WhatsApp Web's module system: `WAWebCollections` (Chat / Msg /
 Contact), `WAWebChatLoadMessages.loadEarlierMsgs`, `WAWebSendMsgChatAction.
 addAndSendMsgToChat`, `WAWebSendReactionMsgAction.sendReactionToMsg`,
-`WAWebCmd.openChatAt`, `WAWebUserPrefsMeUser.getMeUser` (login probe).
-Model fields carry the `__x_` prefix. The full verified API map lives in
-`core/_roadmap/p1/whatsapp-live/research.md`. If WhatsApp ships a breaking
-Web update, that map plus the whatsapp-web.js project are the references
-for re-deriving module names.
+`WAWebCmd.openChatAt`, `WAWebMsgKey.newId/fromString` (send ids),
+`WAWebUserPrefsMeUser.getMeUser` (login probe). Model fields carry the
+`__x_` prefix. If WhatsApp ships a breaking Web update, the whatsapp-web.js
+project is the reference for re-deriving module names and call shapes.
+
+Drift traps already survived (patterns to keep):
+
+- **Unset model fields are truthy sentinel objects**
+  (`{sentinel: 'DEFAULT VALUE PLACEHOLDER'}`), not undefined. Never branch
+  on truthiness — the helpers' `str()` / `Number.isFinite` / `=== true`
+  guards exist for this.
+- **Sends need the full message construct** (`WAWebMsgKey` id, `from`/`to`
+  Wids, `t`, `self: 'out'`, `isNewMsg`, `local`) — a minimal `{body, type}`
+  builds an empty husk that never reaches the wire. And
+  `addAndSendMsgToChat` resolves to `[msg, sendPromise]`: only awaiting the
+  *inner* promise surfaces wire success/failure.
+- **Two message collections**: the global `Msg` collection sees loaded +
+  synced messages; each chat's own `chat.msgs` is the authoritative
+  per-chat list (locally-sent messages land there first).
+- For media, `__x_body` holds the preview thumbnail base64 — text lives in
+  `__x_caption` only.
