@@ -62,9 +62,10 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
 - `send_reaction` reports `dispatched`, not delivered: WhatsApp Web gives
   a headless tab no client-side echo for reactions. Check a phone if
   delivery matters.
-- `watch` survives page reloads, session drops, and browser restarts (the
-  engine re-installs the hook and reconnects with backoff). Only an engine
-  restart clears it — re-arm with one `watch` call.
+- `watch` is durable: it survives page reloads, session drops, browser
+  restarts (the engine re-installs the hook and reconnects with backoff),
+  and engine restarts (the intent persists on the graph; boot re-arms it).
+  Arm once, ever.
 - Chats are `@lid`-keyed (WhatsApp's post-2026 chat ids); groups stay
   `@g.us`. `list_persons` resolves LIDs to names + phone JIDs via Contacts.
 

@@ -486,10 +486,10 @@ async def watch(**params):
     Installs a hook on the live session; each incoming or outgoing
     message lands in the graph as a `message` entity the moment WhatsApp
     receives it — observers (SSE) fire as with any other graph write.
-    The subscription is a standing intent in the engine: it survives
-    page reloads, session drops, and browser restarts (the engine
-    reconnects with backoff). Idempotent: safe to call repeatedly.
-    Only an engine restart clears it — re-arm after one.
+    The subscription is durable: it survives page reloads, session
+    drops, browser restarts (the engine reconnects with backoff), and
+    engine restarts (boot re-arms it from the graph). Arm once, ever.
+    Idempotent: safe to call repeatedly.
     """
     hook = _WATCH_HOOK % {
         "helpers": _HELPERS,
@@ -500,6 +500,7 @@ async def watch(**params):
         "js": hook,
         "marker": _WATCH_MARKER,
         "subscriber": "whatsapp",
+        "op": "watch",
     })
     return {"watching": True, "stream": "message"}
 
