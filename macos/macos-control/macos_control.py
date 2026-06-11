@@ -8,6 +8,7 @@ import mimetypes
 import os
 import pwd
 import stat
+import struct
 import sys
 import time
 from datetime import datetime, timezone
@@ -1091,6 +1092,161 @@ async def get_file_info(*, path, **_kwargs):
 # core/_roadmap/p2/realms-transports/plan.md "The transport contract".
 
 TRANSPORT_PAGE_SIZE = 500
+
+
+# Finder sidebar favorites — the .sfl* shared-file-list store. macOS
+# migrated FavoriteItems from .sfl3 (≤15 Sequoia) to .sfl4 (26 Tahoe);
+# both are NSKeyedArchiver binary plists with identical logical
+# structure, so one parser globs both and reads the newest.
+SHAREDFILELIST_DIR = os.path.expanduser(
+    "~/Library/Application Support/com.apple.sharedfilelist"
+)
+FAVORITE_ITEMS_PREFIX = "com.apple.LSSharedFileList.FavoriteItems.sfl"
+ITEM_IS_HIDDEN = "com.apple.LSSharedFileList.ItemIsHidden"
+
+
+def _ns_unarchive(objs, o):
+    """Resolve one NSKeyedArchiver object: follow UIDs into $objects,
+    materialize NSDictionary/NSArray wrappers into plain dict/list."""
+    import plistlib
+
+    if isinstance(o, plistlib.UID):
+        return _ns_unarchive(objs, objs[o.data])
+    if isinstance(o, dict):
+        if "NS.keys" in o:
+            return {
+                _ns_unarchive(objs, k): _ns_unarchive(objs, v)
+                for k, v in zip(o["NS.keys"], o["NS.objects"])
+            }
+        if "NS.objects" in o:
+            return [_ns_unarchive(objs, v) for v in o["NS.objects"]]
+    return o
+
+
+def _favorite_items_path():
+    """Newest FavoriteItems.sfl* file, or None when absent (fresh user)."""
+    try:
+        candidates = [
+            os.path.join(SHAREDFILELIST_DIR, name)
+            for name in os.listdir(SHAREDFILELIST_DIR)
+            if name.startswith(FAVORITE_ITEMS_PREFIX)
+        ]
+    except FileNotFoundError:
+        return None
+    return max(candidates, key=os.path.getmtime, default=None)
+
+
+# Apple bookmark-blob records the sidebar import needs. Format reference:
+# mac_alias `Bookmark.from_bytes` — which the sandbox can't import (its
+# darwin-only `osx` module pulls ctypes eagerly), so the focused subset
+# (strings + string-arrays out of the TOC) is parsed here directly.
+BMK_PATH = 0x1004           # array of path components
+BMK_VOLUME_PATH = 0x2002    # mount point of the containing volume
+BMK_DISPLAY_NAME = 0xF017   # the sidebar label
+_BMK_TYPE_MASK = 0xFFFFFF00
+_BMK_STRING = 0x0100
+_BMK_ARRAY = 0x0600
+
+
+def _bookmark_records(data, wanted):
+    """Read `wanted` record ids from an Apple bookmark blob, purely from
+    bytes — no filesystem resolution, so favorites on unmounted volumes
+    still yield their creation-time paths. Returns {record_id: value}
+    for the string / string-array records present."""
+    if len(data) < 16:
+        raise ValueError("not a bookmark blob (too short)")
+    magic, size, _dummy, hdrsize = struct.unpack(b"<4sIII", data[0:16])
+    if magic not in (b"book", b"alis") or hdrsize < 16 or size != len(data):
+        raise ValueError("not a bookmark blob")
+
+    def item(offset):
+        offset += hdrsize
+        length, typecode = struct.unpack(b"<II", data[offset : offset + 8])
+        body = data[offset + 8 : offset + 8 + length]
+        dtype = typecode & _BMK_TYPE_MASK
+        if dtype == _BMK_STRING:
+            return body.decode("utf-8")
+        if dtype == _BMK_ARRAY:
+            return [
+                item(struct.unpack(b"<I", data[a : a + 4])[0])
+                for a in range(offset + 8, offset + 8 + length, 4)
+            ]
+        return None  # other record types aren't needed here
+
+    out = {}
+    (tocoffset,) = struct.unpack(b"<I", data[hdrsize : hdrsize + 4])
+    while tocoffset:
+        tocbase = hdrsize + tocoffset
+        _tocsize, tocmagic, _tocid, nexttoc, count = struct.unpack(
+            b"<IIIII", data[tocbase : tocbase + 20]
+        )
+        if tocmagic != 0xFFFFFFFE:
+            break
+        for n in range(count):
+            ebase = tocbase + 20 + 12 * n
+            eid, eoffset, _edummy = struct.unpack(b"<III", data[ebase : ebase + 12])
+            if eid in wanted and eid not in out:
+                out[eid] = item(eoffset)
+        tocoffset = nexttoc
+    return out
+
+
+@test(params={})
+@returns({"shortcuts": "{'type': 'array', 'description': 'OS quick-access rows: name, id (absolute path), volumeAddress (mount point)'}", "count": "integer"})
+@timeout(15)
+async def list_shortcuts(**_kwargs):
+    """Announce the macOS Finder sidebar favorites — the OS's own
+    quick-access entries for the volumes this transport serves.
+
+    The optional fourth verb of the volume_transport contract: the
+    engine's transport reconcile dispatches it after the volume
+    announce and lands each row as a bookmark in the user's favorites
+    list (cross-volume points_to into the announced volume). Like
+    list_volumes, the envelope carries no shape — the engine is the
+    only graph writer.
+
+    Each item's path and display name are read purely from the Apple
+    bookmark blob bytes — no filesystem resolution, so favorites on
+    unmounted volumes still yield their paths. Items the user hid in
+    Finder are skipped; array order is sidebar order.
+    """
+    import plistlib
+
+    sfl_path = _favorite_items_path()
+    if sfl_path is None:
+        return {"shortcuts": [], "count": 0}
+
+    with open(sfl_path, "rb") as f:
+        archive = plistlib.load(f)
+    objs = archive["$objects"]
+    root = _ns_unarchive(objs, archive["$top"]["root"])
+
+    out = []
+    for item in root.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        props = item.get("CustomItemProperties") or {}
+        if props.get(ITEM_IS_HIDDEN):
+            continue
+        blob = item.get("Bookmark")
+        if not blob:
+            continue
+        try:
+            records = _bookmark_records(
+                bytes(blob), {BMK_PATH, BMK_VOLUME_PATH, BMK_DISPLAY_NAME}
+            )
+        except (ValueError, struct.error):
+            continue  # one undecodable legacy blob must not sink the announce
+        components = records.get(BMK_PATH)
+        if not components:
+            continue
+        path = "/" + "/".join(str(c) for c in components)
+        volume_path = str(records.get(BMK_VOLUME_PATH) or "/")
+        # The sidebar label — the blob's display-name record, falling
+        # back to the last path component.
+        name = str(records.get(BMK_DISPLAY_NAME) or components[-1])
+        out.append({"name": name, "id": path, "volumeAddress": volume_path})
+    return {"shortcuts": out, "count": len(out)}
 
 
 @test(params={})
