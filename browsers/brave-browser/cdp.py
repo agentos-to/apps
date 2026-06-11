@@ -14,14 +14,17 @@ layers — RE / scraping / MFA skills consume `browser_session`;
 `cdp_access`; this module provides `cdp_access`. Zero cross-skill
 imports; engine matchmakes every boundary.
 
-Phase 1 ships **attach mode only**. Brave must be running with
-`--remote-debugging-port=<port>`. If it isn't, we return a
-structured `NeedsDebugBrowser` error that tells the agent exactly
-how to fix it. Launch mode (spawn a fresh debug-attachable instance
-with an isolated profile) is a Phase-2 follow-up once we have a
-clear SDK story for detached background processes.
+Two modes. **attach**: Brave must already be running with
+`--remote-debugging-port=<port>`; if it isn't, we return a
+structured `NeedsDebugBrowser` error with the exact relaunch
+command. **launch**: spawn (or reuse) an engine-owned Brave
+instance with its own profile at `~/.agentos/browsers/brave` —
+a dedicated, always-on session host that doesn't share fate with
+the user's daily browser. `open -na` detaches via LaunchServices,
+so the instance survives the skill call.
 """
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -32,6 +35,7 @@ from agentos import (
     connection,
     provides,
     returns,
+    shell,
     skill_error,
     timeout,
 )
@@ -52,6 +56,13 @@ _BRAVE_BASE = os.path.expanduser(
 # (we don't use it — /json/version gives us the canonical URL).
 _DEVTOOLS_ACTIVE_PORT_FILE = os.path.join(_BRAVE_BASE, "DevToolsActivePort")
 
+# Launch mode runs an engine-owned instance against its own profile so
+# the session host never shares fate with the user's daily browser.
+# Chromium treats user-data-dir as the instance key: same dir = same
+# instance, different dir = a genuinely separate process.
+_AGENTOS_PROFILE = os.path.expanduser("~/.agentos/browsers/brave")
+_AGENTOS_PORT_FILE = os.path.join(_AGENTOS_PROFILE, "DevToolsActivePort")
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Connection — public, no auth. We only hit the local debug endpoint.
@@ -69,17 +80,21 @@ connection(
 # Port discovery
 # ──────────────────────────────────────────────────────────────────────
 
-def _read_devtools_active_port() -> int | None:
+def _read_devtools_active_port(
+    port_file: str = _DEVTOOLS_ACTIVE_PORT_FILE,
+) -> int | None:
     """Read the auto-assigned port Brave wrote to DevToolsActivePort.
 
     File exists iff Brave launched with `--remote-debugging-port`.
     Missing file = Brave not in debug mode (the common case — users
-    don't launch with debug flags by default).
+    don't launch with debug flags by default). Chromium leaves the
+    file behind after a crash, so a readable port is only a *candidate*
+    — callers must confirm with /json/version.
     """
-    if not os.path.exists(_DEVTOOLS_ACTIVE_PORT_FILE):
+    if not os.path.exists(port_file):
         return None
     try:
-        with open(_DEVTOOLS_ACTIVE_PORT_FILE, "r") as f:
+        with open(port_file, "r") as f:
             first_line = f.readline().strip()
         return int(first_line) if first_line else None
     except (OSError, ValueError):
@@ -126,6 +141,78 @@ async def _fetch_targets(port: int) -> list[dict[str, Any]]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Launch mode — the engine-owned instance
+# ──────────────────────────────────────────────────────────────────────
+
+async def _ensure_agentos_instance() -> int | dict[str, Any]:
+    """Return the debug port of the engine-owned Brave, launching it
+    if needed. Returns the port on success, a `skill_error` dict on
+    failure.
+
+    Reuse before launch: if the profile's DevToolsActivePort names a
+    port that answers /json/version, that's our instance — `open -na`
+    with the same user-data-dir would only flash a new window at it.
+    """
+    candidate = _read_devtools_active_port(_AGENTOS_PORT_FILE)
+    if candidate is not None and await _fetch_version(candidate) is not None:
+        return candidate
+
+    # No (responsive) instance. A frozen or half-dead one would shadow
+    # `open -na`: until its SingletonLock is released, a new process
+    # with the same user-data-dir defers to it and exits without ever
+    # rewriting DevToolsActivePort. Kill and *wait for actual exit*
+    # before launching — SIGTERM first (clean profile shutdown),
+    # SIGKILL if it lingers. pkill/pgrep exit 1 on no match.
+    pattern = f"user-data-dir={_AGENTOS_PROFILE}"
+    await shell.run("pkill", args=["-f", pattern])
+    for attempt in range(10):
+        alive = await shell.run("pgrep", args=["-f", pattern])
+        if alive.get("exit_code") != 0:
+            break
+        if attempt == 5:
+            await shell.run("pkill", args=["-9", "-f", pattern])
+        await asyncio.sleep(0.5)
+    # Remove the stale port file so the poll below only ever reads the
+    # port the new process writes.
+    try:
+        os.remove(_AGENTOS_PORT_FILE)
+    except OSError:
+        pass
+    os.makedirs(_AGENTOS_PROFILE, exist_ok=True)
+
+    launched = await shell.run("open", args=[
+        "-na", "Brave Browser", "--args",
+        f"--user-data-dir={_AGENTOS_PROFILE}",
+        "--remote-debugging-port=0",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ])
+    if launched.get("exit_code", 1) != 0:
+        return skill_error(
+            "Failed to launch Brave via `open -na`. Is Brave Browser "
+            "installed?",
+            code="LaunchFailed",
+            result=launched,
+        )
+
+    # Brave writes DevToolsActivePort once the debug listener is up —
+    # typically 1-3s cold.
+    for _ in range(40):
+        await asyncio.sleep(0.5)
+        port = _read_devtools_active_port(_AGENTOS_PORT_FILE)
+        if port is not None and await _fetch_version(port) is not None:
+            return port
+
+    return skill_error(
+        "Launched Brave but its debug port never came up within 20s. "
+        f"Check whether a window appeared and whether "
+        f"{_AGENTOS_PORT_FILE} exists.",
+        code="LaunchFailed",
+        profile=_AGENTOS_PROFILE,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # The tool
 # ──────────────────────────────────────────────────────────────────────
 
@@ -145,7 +232,7 @@ async def _fetch_targets(port: int) -> list[dict[str, Any]]:
                 "list so callers can pick a page target if needed.",
 )
 @connection("cdp")
-@timeout(10)
+@timeout(30)
 async def cdp_connect(
     *,
     mode: str = "attach",
@@ -155,12 +242,15 @@ async def cdp_connect(
     """Return a CDP WebSocket URL for a debug-attachable Brave.
 
     Args:
-        mode: `"attach"` (the only mode supported in Phase 1). Finds
-            a running Brave with a debug port. Launch mode (spawning
-            a fresh instance) is a Phase-2 follow-up.
-        port: Optional specific port to try. When `None`, we read
-            `DevToolsActivePort` — the file Brave writes inside its
-            user-data dir when launched with debug enabled.
+        mode: `"attach"` finds a running Brave with a debug port (the
+            user's daily browser, relaunched with the flag). `"launch"`
+            spawns — or reuses — the engine-owned instance with its own
+            profile at `~/.agentos/browsers/brave`; use this for
+            always-on session hosts that must not share fate with the
+            user's browsing.
+        port: Optional specific port to try (attach mode only). When
+            `None`, we read `DevToolsActivePort` — the file Brave
+            writes inside its user-data dir when debug is enabled.
 
     Returns a shape the `browser_session` provider (or any other
     caller) can use to open its own WebSocket:
@@ -173,24 +263,30 @@ async def cdp_connect(
         }
 
     Structured errors (surfaced via `skill_error`):
-        - NeedsDebugBrowser: no debug port found. Message includes the
-          exact relaunch command.
+        - NeedsDebugBrowser: attach mode, no debug port found. Message
+          includes the exact relaunch command.
         - CDPConnectFailed: port found but /json/version failed
           (browser frozen, protocol mismatch).
-        - UnsupportedMode: mode != "attach" (launch not yet supported).
+        - LaunchFailed: launch mode couldn't start the instance or its
+          debug port never came up.
+        - UnsupportedMode: mode not in {attach, launch}.
     """
-    if mode != "attach":
+    if mode not in ("attach", "launch"):
         return skill_error(
-            f"Mode {mode!r} not yet supported. Phase 1 ships attach "
-            f"mode only — Brave must be running with "
-            f"--remote-debugging-port. Launch mode is queued.",
+            f"Mode {mode!r} not supported.",
             code="UnsupportedMode",
             mode=mode,
-            supported=["attach"],
+            supported=["attach", "launch"],
         )
 
-    # Prefer an explicit port; otherwise read DevToolsActivePort.
-    resolved_port = port if port is not None else _read_devtools_active_port()
+    if mode == "launch":
+        resolved = await _ensure_agentos_instance()
+        if isinstance(resolved, dict):  # skill_error envelope
+            return resolved
+        resolved_port = resolved
+    else:
+        # Prefer an explicit port; otherwise read DevToolsActivePort.
+        resolved_port = port if port is not None else _read_devtools_active_port()
     if resolved_port is None:
         return skill_error(
             "Brave is not running with --remote-debugging-port. "
@@ -235,10 +331,11 @@ async def cdp_connect(
 
     tabs = await _fetch_targets(resolved_port)
 
+    owner = "engine-owned Brave" if mode == "launch" else "Brave"
     return {
         "ws_url": ws_url,
         "target_id": target_id,
         "browser_version": browser_version,
-        "attached_to": f"Brave on port {resolved_port}",
+        "attached_to": f"{owner} on port {resolved_port}",
         "tabs": tabs,
     }

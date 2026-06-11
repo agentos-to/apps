@@ -2,7 +2,9 @@
 id: brave-browser
 capabilities:
   - crypto
+  - http
   - secrets
+  - shell
   - sql
 name: Brave Browser
 description: "Browsing history, bookmarks, and cookies from Brave Browser on macOS — including session key extraction for claude.ai"
