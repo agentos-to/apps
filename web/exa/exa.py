@@ -40,7 +40,6 @@ connection(
 
 
 API_BASE = "https://api.exa.ai"
-CALLBACK_URL = "https://dashboard.exa.ai/"
 
 # browser_session targets — a URL substring; the engine opens
 # https://<target>/ in the engine-owned browser when no tab matches.
@@ -106,10 +105,78 @@ async def _check_session() -> dict | None:
 def _needs_auth():
     return app_error(
         "No live Exa dashboard session in the AgentOS browser profile. "
-        "Run exa.login — it sends a 6-digit code to the account email; "
-        "verify_login_code completes the sign-in inside the browser.",
+        "Run exa.login — it emails a verification code to the account "
+        "address; verify_login_code completes the sign-in in the browser.",
         code="NeedsAuth",
     )
+
+
+# React-safe value set: the native setter + input/change events. A plain
+# `el.value = …` is ignored by the framework's controlled inputs and the
+# submit button stays disabled.
+_REACT_SET = """
+const __setVal = (el, v) => {
+  const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  s.call(el, v);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+};
+"""
+
+# Drive the real sign-in form rather than POST /api/auth/signin/email:
+# Exa fronts that endpoint with Cloudflare Turnstile, which 403s a
+# programmatic call. Submitting the actual form lets Turnstile solve
+# invisibly in the real browser — the whole point of browser-as-store.
+_LOGIN_JS = _REACT_SET + """
+let emailInp = null;
+const d1 = Date.now() + 15000;
+while (Date.now() < d1) {
+  emailInp = document.querySelector('input[type=email]');
+  if (emailInp) break;
+  await new Promise(r => setTimeout(r, 300));
+}
+if (!emailInp) return { __error: 'sign-in form never appeared' };
+__setVal(emailInp, %(email)s);
+await new Promise(r => setTimeout(r, 400));
+const cont = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Continue');
+if (!cont) return { __error: 'no Continue button on the sign-in form' };
+for (let i = 0; i < 20 && cont.disabled; i++) await new Promise(r => setTimeout(r, 500));
+cont.click();
+const d2 = Date.now() + 25000;
+while (Date.now() < d2) {
+  if (document.querySelector('input[placeholder="Enter verification code"]')) return { sent: true };
+  if (/verification code has been sent/i.test(document.body.innerText)) return { sent: true };
+  await new Promise(r => setTimeout(r, 400));
+}
+return { __error: 'code entry never appeared (Turnstile may have blocked the submit)' };
+"""
+
+# Enter the code in the real form and wait for the redirect to the
+# dashboard. The session lands in the profile via the form's own flow —
+# nothing extracted, nothing vaulted.
+_VERIFY_JS = _REACT_SET + """
+let codeInp = null;
+const d1 = Date.now() + 12000;
+while (Date.now() < d1) {
+  codeInp = document.querySelector('input[placeholder="Enter verification code"]')
+    || [...document.querySelectorAll('input')].find(i => i.maxLength === 6 && i.type !== 'hidden');
+  if (codeInp) break;
+  await new Promise(r => setTimeout(r, 300));
+}
+if (!codeInp) return { __error: 'code input never appeared — run login first' };
+__setVal(codeInp, %(code)s);
+await new Promise(r => setTimeout(r, 400));
+const btn = [...document.querySelectorAll('button')].find(b => /verify/i.test(b.textContent));
+if (!btn) return { __error: 'no Verify button' };
+btn.click();
+const d2 = Date.now() + 20000;
+while (Date.now() < d2) {
+  if (location.hostname.indexOf('dashboard.') === 0) return { ok: true };
+  if (/invalid|incorrect|expired|wrong code/i.test(document.body.innerText)) return { __error: 'code rejected' };
+  await new Promise(r => setTimeout(r, 400));
+}
+return { __error: 'no redirect to dashboard after verify' };
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -189,23 +256,16 @@ async def login(*, email: str = "", **params) -> dict:
         )
     email = normalize_email(email)
 
-    value = await _eval(_AUTH, f"""
-const csrf = await (await fetch('/api/auth/csrf')).json().catch(() => null);
-if (!csrf || !csrf.csrfToken) return {{ __error: 'csrf_failed' }};
-const body = new URLSearchParams({{
-  email: {json.dumps(email)},
-  csrfToken: csrf.csrfToken,
-  callbackUrl: {json.dumps(CALLBACK_URL)},
-  json: 'true',
-}});
-const r = await fetch('/api/auth/signin/email', {{ method: 'POST', body }});
-if (!r.ok) return {{ __error: 'http_' + r.status }};
-return {{ sent: true }};
-""")
+    # Drive the real sign-in form (not a fetch to /api/auth/signin/email —
+    # that's Turnstile-fronted and 403s a programmatic call). Submitting
+    # the form lets Turnstile clear invisibly in the real browser.
+    value = await _eval(_DASHBOARD, _LOGIN_JS % {"email": json.dumps(email)},
+                        timeout_s=70)
     if not isinstance(value, dict) or value.get("__error"):
         detail = value.get("__error") if isinstance(value, dict) else value
         return app_error(
-            f"Triggering the verification email failed in the auth tab: {detail}",
+            f"Driving the Exa sign-in form failed: {detail}. The login page "
+            "shape may have changed — re-inspect the form.",
             code="SigninFailed",
         )
 
@@ -213,11 +273,27 @@ return {{ sent: true }};
         "name": "Exa sign-in code",
         "kind": "code_sent",
         "payload": email,
-        "artifact": f"6-digit code sent to {email} — subject 'Sign in to Exa Dashboard'",
+        "artifact": f"Verification code emailed to {email}.",
+        # Self-serve hint for an agent with email access — where to look,
+        # NOT how to parse. The agent reads the message, confirms it's a
+        # genuine Exa sign-in (sender, recency, subject) and reads the
+        # code with judgment. No regex: the code may be digits, alnum
+        # (e.g. "23THE6"), or a link, and judgment also catches a
+        # phishing look-alike a pattern would blindly trust.
+        "retrieval": {
+            "via": "email",
+            "deliveredTo": email,
+            "sender": "exa.ai",
+            "subjectHint": "Sign in to Exa Dashboard",
+            "look_for": "a short verification code in the body "
+                        "('Your verification code for Exa is: …')",
+        },
         "instructions": (
-            "Read the 6-digit code (email subject 'Sign in to Exa Dashboard', "
-            "from exa.ai) via any email_lookup provider before involving the "
-            "human, then call verify_login_code(email, code)."
+            f"Read the verification email Exa just sent to {email} (from "
+            "exa.ai, subject 'Sign in to Exa Dashboard'). Confirm it's "
+            "genuine and recent, read the code from the body, then call "
+            "verify_login_code(email, code). Only ask the human if the "
+            "message isn't there."
         ),
         "continueWith": "verify_login_code",
     }
@@ -228,57 +304,33 @@ return {{ sent: true }};
 @connection("none")
 @timeout(90)
 async def verify_login_code(*, email: str, code: str, **params) -> dict:
-    """Verify the 6-digit code and complete login inside the browser.
+    """Enter the verification code in the sign-in form and finish login.
 
-    Runs Exa's verify-otp + NextAuth callback same-origin in the auth
-    tab. The callback's Set-Cookie lands `next-auth.session-token`
-    directly in the browser profile — the profile IS the session store;
-    nothing is extracted or vaulted. Confirms by reading the session
-    back from the dashboard tab.
+    Types the code into the live form (the one `login` advanced to) and
+    waits for the redirect to the dashboard. The session lands in the
+    browser profile through the form's own flow — the profile IS the
+    session store; nothing is extracted or vaulted. Confirms by reading
+    the session back.
     """
     if not email or not code:
         return app_error("email and code are required.", code="BadParams")
     email = normalize_email(email)
 
-    value = await _eval(_AUTH, f"""
-await fetch('/api/auth/csrf');
-const r = await fetch('/api/verify-otp', {{
-  method: 'POST',
-  headers: {{ 'Content-Type': 'application/json' }},
-  body: JSON.stringify({{ email: {json.dumps(email)}, otp: {json.dumps(code)} }}),
-}});
-if (r.status !== 200) {{
-  const err = await r.json().catch(() => null);
-  return {{ __error: (err && err.error) || ('http_' + r.status) }};
-}}
-const data = await r.json();
-if (!data.hashedOtp) return {{ __error: 'verify-otp returned no hashedOtp' }};
-const qs = new URLSearchParams({{
-  email: {json.dumps(email)},
-  token: data.hashedOtp + ':' + data.rawOtp,
-  callbackUrl: {json.dumps(CALLBACK_URL)},
-}});
-// redirect:'manual' — the 302 itself carries the Set-Cookie; following
-// it cross-origin to the dashboard would only trip CORS.
-const cb = await fetch('/api/auth/callback/email?' + qs, {{ redirect: 'manual' }});
-if (cb.type !== 'opaqueredirect' && cb.status >= 400) {{
-  return {{ __error: 'callback_http_' + cb.status }};
-}}
-return {{ ok: true }};
-""")
+    value = await _eval(_DASHBOARD, _VERIFY_JS % {"code": json.dumps(code)},
+                        timeout_s=60)
     if not isinstance(value, dict) or value.get("__error"):
         detail = value.get("__error") if isinstance(value, dict) else value
         return app_error(
-            f"Code verification failed: {detail}",
+            f"Entering the code failed: {detail}. If the code was rejected, "
+            "request a fresh one with login and retry.",
             code="VerifyFailed",
         )
 
     session = await _check_session()
     if not session:
         return app_error(
-            "The callback ran but no session is live — the code was likely "
-            "rejected (NextAuth signals failure via a redirect, not a "
-            "status). Request a fresh code with login and retry.",
+            "The form accepted the code but no live session followed — "
+            "request a fresh code with login and retry.",
             code="VerifyFailed",
         )
     return _account_from_session(session)
