@@ -391,7 +391,7 @@ def _map_email(msg):
         # Relations
         "from": from_obj,
         "to": to_accounts,
-        "cc": cc_accounts,
+        "copied_to": cc_accounts,
         "bcc": bcc_accounts,
         "domain": {"name": _extract_domain(from_obj.get("handle", ""))} if _extract_domain(from_obj.get("handle", "")) else None,
         "toDomain": _domains_from_accounts(to_accounts),

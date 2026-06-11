@@ -15,7 +15,7 @@ import json
 import os
 import re
 
-from agentos import client, returns, skill_error
+from agentos import client, returns, app_error
 
 # tx.fhir.org — HL7's public FHIR terminology server, LOINC loaded, no
 # auth. Reached directly; `capabilities: [http]` in the readme grants it.
@@ -138,26 +138,26 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
     """
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(path):
-        return skill_error(f"Not a file: {path}")
+        return app_error(f"Not a file: {path}")
 
     with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         text = f.read()
 
     fmt = _detect(path, text)
     if not fmt:
-        return skill_error(
+        return app_error(
             f"Unrecognized lab-report format: {os.path.basename(path)}")
 
     draw_date = date or _date_from_filename(path)
     if not draw_date:
-        return skill_error(
+        return app_error(
             "No draw date — pass date=YYYY-MM-DD (none in filename).")
 
     lab = lab or _infer_lab(path)
     lab_slug = _slug(lab)
     rows = _FORMATS[fmt][1](text)
     if not rows:
-        return skill_error(
+        return app_error(
             f"No analyte rows parsed from {os.path.basename(path)}")
 
     # The source file and the panel both ride as 1-deep relations on each

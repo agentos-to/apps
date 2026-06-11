@@ -1134,7 +1134,7 @@ def _parse_order_detail(body: str, order_id: str) -> dict[str, Any]:
         "totalAmount": _parse_price(total),
         "status": status,
         "deliveryDate": delivery_date,
-        "shippingAddress": shipping_address,
+        "shipped_to": shipping_address,
         "trackingUrl": tracking_url,
         "summary": summary or None,
         "itemCount": len(items),

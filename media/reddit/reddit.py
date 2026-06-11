@@ -30,7 +30,7 @@ def _map_post(d: dict) -> dict:
         "published": _ts(d.get("created_utc")),
         "score": d.get("score"),
         "commentCount": d.get("num_comments"),
-        "postedBy": {
+        "posted_by": {
             "id": author,
             "name": author,
             "url": f"https://reddit.com/u/{author}",
@@ -118,8 +118,8 @@ async def get_post(id: str = None, url: str = None, comment_limit: int = None, *
         if m:
             id = m.group(1)
     if not id:
-        from agentos import skill_error
-        return skill_error("Either id or url is required")
+        from agentos import app_error
+        return app_error("Either id or url is required")
 
     params = {}
     if comment_limit:
@@ -147,7 +147,7 @@ async def get_post(id: str = None, url: str = None, comment_limit: int = None, *
             "author": author,
             "published": _ts(d.get("created_utc")),
             "score": d.get("ups"),
-            "postedBy": {
+            "posted_by": {
                 "id": author,
                 "name": author,
                 "url": f"https://reddit.com/u/{author}",
@@ -185,12 +185,12 @@ async def comments_post(id: str, comment_limit: int = None, **params) -> list[di
             "author": author,
             "published": _ts(d.get("created_utc")),
             "score": d.get("ups"),
-            "postedBy": {
+            "posted_by": {
                 "id": author,
                 "name": author,
                 "url": f"https://reddit.com/u/{author}",
             } if author else None,
-            "repliesTo": {"id": parent_id},
+            "replies_to": {"id": parent_id},
         }
         result.append(comment)
         replies_raw = d.get("replies")

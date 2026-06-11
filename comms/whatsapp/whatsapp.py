@@ -1,8 +1,8 @@
 """WhatsApp — live WhatsApp Web via the engine-held browser session.
 
 Every op is one JS payload evaluated in the WhatsApp Web tab of the
-engine-owned Brave instance, through the `browser_session` capability
-(`capability.call` — the engine matchmakes the provider; this skill
+engine-owned Brave instance, through the `browser_session` service
+(`services.call` — the engine matchmakes the provider; this app
 never sees CDP). WhatsApp's own code has already done both crypto
 layers (Noise + Signal); the payloads read the decrypted JS Store
 collections (`WAWebCollections`) and call the same action modules the
@@ -16,8 +16,9 @@ groups). Ops that take a chat accept a JID or a fuzzy name match.
 """
 
 import json
+import mimetypes
 
-from agentos import blobs, capability, returns, skill_error, timeout
+from agentos import app_error, blobs, returns, services, timeout
 
 _TARGET = "web.whatsapp.com"
 
@@ -146,7 +147,7 @@ async def _eval(body: str, *, wait_ms: int = 20000, timeout_s: int = 45):
     """Run an op body in the WhatsApp Web tab; surface structured errors."""
     # The provider returns `{value: <js value>}`; the engine's
     # value-envelope unwrap hands us the JS value directly.
-    value = await capability.call("browser_session", params={
+    value = await services.call(services.browser_session, params={
         "target": _TARGET,
         "js": _payload(body, wait_ms=wait_ms),
         "timeout": timeout_s,
@@ -155,29 +156,29 @@ async def _eval(body: str, *, wait_ms: int = 20000, timeout_s: int = 45):
     if isinstance(value, dict) and "__error" in value:
         code = value["__error"]
         if code == "auth_required":
-            return skill_error(
+            return app_error(
                 "WhatsApp Web is not linked in the engine-owned browser. "
                 "Open the WhatsApp Web tab in the AgentOS Brave instance "
                 "and scan the QR code with your phone (one-time setup).",
                 code="NeedsAuth",
             )
         if code == "not_ready":
-            return skill_error(
+            return app_error(
                 "WhatsApp Web's module system never came up — the page may "
                 "still be loading, or a WhatsApp update changed the internals.",
                 code="NotReady",
             )
         if code == "not_found":
-            return skill_error(
+            return app_error(
                 f"No match for {value.get('ref')!r} ({value.get('what', 'item')}).",
                 code="NotFound",
             )
         if code == "send_failed":
-            return skill_error(
+            return app_error(
                 f"WhatsApp did not accept the message: {value.get('what')}",
                 code="SendFailed",
             )
-        return skill_error(f"WhatsApp payload error: {code}", code="PayloadError")
+        return app_error(f"WhatsApp payload error: {code}", code="PayloadError")
 
     return value
 
@@ -413,26 +414,33 @@ async def get_message(*, id, **params):
 
 
 @returns("message[]")
-@timeout(60)
-async def search_messages(*, query, limit=200, **params):
-    """Search message text across chats currently loaded in the Web session.
+@timeout(90)
+async def search_messages(*, query, conversation_id=None, limit=100, page=1, **params):
+    """Search messages server-side — WhatsApp's own search, full history.
 
-    Searches the in-memory Store (recent history per chat). For deep
-    history, call `list_messages` on a conversation first to page more
-    messages into memory.
+    The same search the Web UI's search box runs: results come from
+    the server, not just messages loaded in memory, so history from
+    weeks or years back is reachable. Optionally scoped to one chat.
 
     Args:
-        query: Case-insensitive substring to match in message text.
-        limit: Maximum messages to return (newest first).
+        query: Search text (WhatsApp's own matching — words, not regex).
+        conversation_id: Chat JID or name substring to scope the search.
+        limit: Maximum messages per page (newest first).
+        page: 1-based result page — raise it to walk deeper history.
     """
-    return await _eval(f"""
-    const q = {json.dumps(query)}.toLowerCase();
-    return Msg.getModelsArray()
-      .filter(m => msgBody(m).toLowerCase().includes(q))
-      .sort((a, b) => (b.__x_t || 0) - (a.__x_t || 0))
-      .slice(0, {int(limit)})
-      .map(mapMsg);
-    """)
+    scope = ""
+    remote = "undefined"
+    if conversation_id is not None:
+        scope = f"""
+    const scopeChat = findChat({json.dumps(conversation_id)});
+    if (!scopeChat) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(conversation_id)} }};
+    """
+        remote = "scopeChat.__x_id?._serialized"
+    return await _eval(scope + f"""
+    const {{ messages }} = await Msg.search(
+      {json.dumps(query)}, {int(page)}, {int(limit)}, {remote});
+    return (messages || []).map(mapMsg);
+    """, timeout_s=75)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -559,6 +567,145 @@ async def send_message(*, to, text, **params):
     """)
 
 
+@returns("message")
+@timeout(180)
+async def send_media(*, to, path, caption=None, ptt=False, **params):
+    """Send media — an image, video, document, or voice note.
+
+    The file must already live in the engine's blob store
+    (`~/.agentos/blobs/…`): inbound media hydrated by `get_message` is
+    there, and any agent stages new bytes with `blobs.put`. The engine
+    reads the bytes back (`blobs.get` — apps never open files); the
+    payload then runs WhatsApp's own media pipeline — prep, encrypt,
+    upload, send — exactly like the UI's attach button. Returns the
+    sent message entity with its attachment block, same shape as
+    inbound media.
+
+    Args:
+        to: Chat JID or contact/group name substring.
+        path: Blob-store path (from `blobs.put` or a hydrated
+            attachment's `path`).
+        caption: Optional text shown under the media.
+        ptt: Send audio as a voice note (push-to-talk bubble).
+            Requires an ogg/opus file.
+    """
+    blob = await blobs.get(path)
+    if blob.get("size", 0) > _MEDIA_HYDRATION_CAP:
+        return app_error(
+            f"Blob is {blob.get('size')} bytes — payloads over "
+            f"{_MEDIA_HYDRATION_CAP} can't cross the eval channel "
+            "(same cap as inbound hydration).",
+            code="TooLarge",
+        )
+    filename = path.rsplit("/", 1)[-1]
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    entity = await _eval(f"""
+    const chat = findChat({json.dumps(to)});
+    if (!chat) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(to)} }};
+
+    // Rebuild a File from the blob bytes — WhatsApp's pipeline starts
+    // from the same object the attach button hands it.
+    const bin = atob({json.dumps(blob["data"])});
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const file = new File([bytes], {json.dumps(filename)}, {{ type: {json.dumps(mime)} }});
+
+    // Prep (transcode/thumbnail/hash) exactly as the UI does.
+    const OpaqueData = window.require('WAWebMediaOpaqueData');
+    const opaqueData = await OpaqueData.createFromData(file, {json.dumps(mime)});
+    const prep = window.require('WAWebPrepRawMedia')
+      .prepRawMedia(opaqueData, {{ isPtt: {json.dumps(bool(ptt))} }});
+    const mediaData = await prep.waitForPrep();
+    const mediaObject = window.require('WAWebMediaStorage')
+      .getOrCreateMediaObject(mediaData.filehash);
+    if (!mediaData.filehash) return {{ __error: 'send_failed', what: 'media prep produced no filehash' }};
+    if (!(mediaData.mediaBlob instanceof OpaqueData)) {{
+      mediaData.mediaBlob = await OpaqueData.createFromData(
+        mediaData.mediaBlob, mediaData.mediaBlob.type);
+    }}
+    mediaData.renderableUrl = mediaData.mediaBlob.url();
+    mediaObject.consolidate(mediaData.toJSON());
+    mediaData.mediaBlob.autorelease();
+
+    // Encrypt + upload to WhatsApp's media servers; the entry carries
+    // the urls/keys the message references.
+    const mediaType = window.require('WAWebMmsMediaTypes')
+      .msgToMediaType({{ type: mediaData.type, isGif: false }});
+    const {{ uploadMedia }} = window.require('WAWebMediaMmsV4Upload');
+    const uploaded = await uploadMedia({{
+      mimetype: mediaData.mimetype, mediaObject, mediaType }});
+    const entry = uploaded.mediaEntry;
+    if (!entry) return {{ __error: 'send_failed', what: 'media upload returned no entry' }};
+    mediaData.set({{
+      clientUrl: entry.mmsUrl,
+      deprecatedMms3Url: entry.deprecatedMms3Url,
+      directPath: entry.directPath,
+      mediaKey: entry.mediaKey,
+      mediaKeyTimestamp: entry.mediaKeyTimestamp,
+      filehash: mediaObject.filehash,
+      encFilehash: entry.encFilehash,
+      uploadhash: entry.uploadHash,
+      size: mediaObject.size,
+      streamingSidecar: entry.sidecar,
+      firstFrameSidecar: entry.firstFrameSidecar,
+    }});
+
+    // Full message construct + both promises — same traps as
+    // send_message (a husk never reaches the wire; only the inner
+    // promise carries wire success). The media fields spread in over
+    // type: 'chat', so mediaData.type (image/video/ptt/…) wins.
+    const {{ addAndSendMsgToChat }} = window.require('WAWebSendMsgChatAction');
+    const mk = window.require('WAWebMsgKey');
+    const key = mk.fromString('true_' + chat.__x_id._serialized + '_' + (await mk.newId()) + '_out');
+    const mj = mediaData.toJSON();
+    const [, sendPromise] = await addAndSendMsgToChat(chat, {{
+      id: key,
+      ack: 0,
+      from: me,
+      to: chat.__x_id,
+      local: true,
+      self: 'out',
+      t: Math.floor(Date.now() / 1000),
+      isNewMsg: true,
+      type: 'chat',
+      ...mj,
+      caption: {json.dumps(caption)} ?? undefined,
+      body: typeof mj.preview === 'string' ? mj.preview : undefined,
+    }});
+    const result = await sendPromise;
+    if (result?.messageSendResult !== 'OK') {{
+      return {{ __error: 'send_failed', what: JSON.stringify(result ?? null) }};
+    }}
+    const sent = chat.msgs.getModelsArray().find(m => m.__x_id?._serialized === key._serialized);
+    if (sent) return mapMsg(sent);
+    return {{
+      id: key._serialized,
+      content: {json.dumps(caption or "")},
+      published: new Date().toISOString(),
+      conversationId: chat.__x_id._serialized,
+      isOutgoing: true,
+      type: str(mj.type) || 'chat',
+      name: chatName(chat),
+      author: 'Me',
+    }};
+    """, timeout_s=150)
+
+    # The sent message's attachment is the blob we just read — no
+    # re-download needed; hydrate from local truth.
+    if isinstance(entity, dict) and entity.get("id"):
+        entity["attaches"] = [{
+            "shape": _media_shape(mime, entity.get("type", "")),
+            "name": filename,
+            "filename": filename,
+            "mimeType": mime,
+            "size": blob["size"],
+            "path": path,
+            "sha": blob["sha256"],
+        }]
+    return entity
+
+
 # Live hook: self-installing, idempotent, waits for the Store on its
 # own (it also runs on future page loads, where nothing is ready yet).
 # Emits one shape-native entity per new message; the engine routes
@@ -608,7 +755,7 @@ async def watch(**params):
         "helpers": _HELPERS,
         "marker": json.dumps(_WATCH_MARKER),
     }
-    await capability.call("browser_session", verb="subscribe", params={
+    await services.call(services.browser_session, verb="subscribe", params={
         "target": _TARGET,
         "js": hook,
         "marker": _WATCH_MARKER,
@@ -618,10 +765,10 @@ async def watch(**params):
     return {"watching": True, "stream": "message"}
 
 
-@returns({"status": "string", "reactedTo": "string", "conversationName": "string"})
+@returns({"status": "string", "reactedTo": "string", "messageId": "string", "conversationName": "string"})
 @timeout(60)
-async def send_reaction(*, chat, emoji, **params):
-    """React to the most recent message in a chat with an emoji.
+async def send_reaction(*, emoji, chat=None, message_id=None, **params):
+    """React to a message — the latest in a chat, or a specific one by id.
 
     Reports `status: dispatched`, not `sent`: the reaction call is the
     same one whatsapp-web.js uses, but WhatsApp Web gives a headless tab
@@ -629,23 +776,103 @@ async def send_reaction(*, chat, emoji, **params):
     only ground truth.
 
     Args:
-        chat: Chat JID or name substring.
         emoji: Any Unicode emoji (e.g. 🚀).
+        chat: Chat JID or name substring — reacts to its latest message.
+        message_id: Serialized message id (from any message-returning
+            op). The chat rides inside the id; `chat` is not needed.
     """
-    return await _eval(f"""
+    if message_id is None and chat is None:
+        return app_error(
+            "Pass `chat` (react to its latest message) or `message_id` "
+            "(react to that specific message).",
+            code="BadParams",
+        )
+    if message_id is not None:
+        find_msg = f"""
+    // The chat JID rides inside the serialized id — resolve the chat
+    // first and search its own collection (authoritative; the global
+    // Msg one only sees loaded/synced messages), then fall back to it.
+    const key = window.require('WAWebMsgKey').fromString({json.dumps(message_id)});
+    const target = Chat.get(key.remote?._serialized) || null;
+    const msg = (target?.msgs.getModelsArray()
+      .find(m => m.__x_id?._serialized === {json.dumps(message_id)}))
+      || Msg.get({json.dumps(message_id)});
+    if (!msg) return {{ __error: 'not_found', what: 'message', ref: {json.dumps(message_id)} }};
+    """
+    else:
+        find_msg = f"""
     const target = findChat({json.dumps(chat)});
     if (!target) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(chat)} }};
     // The chat's own collection, not the global Msg one — in a headless
     // tab the global collection only sees loaded/synced messages.
-    const lastMsg = target.msgs.getModelsArray()
+    const msg = target.msgs.getModelsArray()
       .slice()
       .sort((a, b) => (Number.isFinite(b.__x_t) ? b.__x_t : 0) - (Number.isFinite(a.__x_t) ? a.__x_t : 0))[0];
-    if (!lastMsg) return {{ __error: 'not_found', what: 'message', ref: 'last message in chat' }};
+    if (!msg) return {{ __error: 'not_found', what: 'message', ref: 'last message in chat' }};
+    """
+    return await _eval(find_msg + f"""
     const {{ sendReactionToMsg }} = window.require('WAWebSendReactionMsgAction');
-    await sendReactionToMsg(lastMsg, {json.dumps(emoji)});
+    await sendReactionToMsg(msg, {json.dumps(emoji)});
+    const chatModel = typeof target !== 'undefined' && target
+      ? target : Chat.get(msg.__x_id?.remote?._serialized);
     return {{
       status: 'dispatched',
-      reactedTo: msgBody(lastMsg).substring(0, 80),
-      conversationName: chatName(target),
+      reactedTo: msgBody(msg).substring(0, 80),
+      messageId: msg.__x_id?._serialized || '',
+      conversationName: chatModel ? chatName(chatModel) : '',
     }};
+    """)
+
+
+@returns({"state": "string", "conversationName": "string"})
+@timeout(60)
+async def send_typing(*, chat, kind="typing", **params):
+    """Show a live chat-state indicator — "typing…" or "recording audio…".
+
+    Fires the same chat-state WhatsApp's composer fires; the
+    counterparty's chat header shows it until WhatsApp's own decay
+    clears it or a send lands. Presence is honesty, not theater: fire
+    it only when a real send follows.
+
+    Args:
+        chat: Chat JID or name substring.
+        kind: `typing` (default), `recording`, or `paused` (clears an
+            indicator without sending).
+    """
+    methods = {
+        "typing": "sendChatStateComposing",
+        "recording": "sendChatStateRecording",
+        "paused": "sendChatStatePaused",
+    }
+    method = methods.get(kind)
+    if method is None:
+        return app_error(
+            f"Unknown chat-state kind {kind!r} — use typing | recording | paused.",
+            code="BadParams",
+        )
+    return await _eval(f"""
+    const target = findChat({json.dumps(chat)});
+    if (!target) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(chat)} }};
+    await window.require('WAWebChatStateBridge').{method}(target.__x_id);
+    return {{ state: {json.dumps(kind)}, conversationName: chatName(target) }};
+    """)
+
+
+@returns({"presence": "string"})
+@timeout(60)
+async def set_presence(*, state="available", **params):
+    """Set the account's online presence — the green "online" dot.
+
+    Args:
+        state: `available` (online) or `unavailable` (offline).
+    """
+    if state not in ("available", "unavailable"):
+        return app_error(
+            f"Unknown presence state {state!r} — use available | unavailable.",
+            code="BadParams",
+        )
+    method = "sendPresenceAvailable" if state == "available" else "sendPresenceUnavailable"
+    return await _eval(f"""
+    await window.require('WAWebPresenceChatAction').{method}();
+    return {{ presence: {json.dumps(state)} }};
     """)

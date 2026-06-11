@@ -1,6 +1,6 @@
 """Brave Browser — CDP access provider.
 
-Implements the `cdp_access` capability: *"give me a CDP WebSocket URL
+Implements the `cdp_access` service: *"give me a CDP WebSocket URL
 to a debug-attachable Brave browser."* Tiny surface — one tool,
 `cdp_connect`. The caller (typically the `browser-control` skill's
 `browser_session` provider) opens its own WebSocket from the returned
@@ -36,7 +36,7 @@ from agentos import (
     provides,
     returns,
     shell,
-    skill_error,
+    app_error,
     timeout,
 )
 
@@ -146,7 +146,7 @@ async def _fetch_targets(port: int) -> list[dict[str, Any]]:
 
 async def _ensure_agentos_instance() -> int | dict[str, Any]:
     """Return the debug port of the engine-owned Brave, launching it
-    if needed. Returns the port on success, a `skill_error` dict on
+    if needed. Returns the port on success, a `app_error` dict on
     failure.
 
     Reuse before launch: if the profile's DevToolsActivePort names a
@@ -188,7 +188,7 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
         "--no-default-browser-check",
     ])
     if launched.get("exit_code", 1) != 0:
-        return skill_error(
+        return app_error(
             "Failed to launch Brave via `open -na`. Is Brave Browser "
             "installed?",
             code="LaunchFailed",
@@ -203,7 +203,7 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
         if port is not None and await _fetch_version(port) is not None:
             return port
 
-    return skill_error(
+    return app_error(
         "Launched Brave but its debug port never came up within 20s. "
         f"Check whether a window appeared and whether "
         f"{_AGENTOS_PORT_FILE} exists.",
@@ -262,7 +262,7 @@ async def cdp_connect(
           tabs:            [{id, type, title, url, webSocketDebuggerUrl}]
         }
 
-    Structured errors (surfaced via `skill_error`):
+    Structured errors (surfaced via `app_error`):
         - NeedsDebugBrowser: attach mode, no debug port found. Message
           includes the exact relaunch command.
         - CDPConnectFailed: port found but /json/version failed
@@ -272,7 +272,7 @@ async def cdp_connect(
         - UnsupportedMode: mode not in {attach, launch}.
     """
     if mode not in ("attach", "launch"):
-        return skill_error(
+        return app_error(
             f"Mode {mode!r} not supported.",
             code="UnsupportedMode",
             mode=mode,
@@ -281,14 +281,14 @@ async def cdp_connect(
 
     if mode == "launch":
         resolved = await _ensure_agentos_instance()
-        if isinstance(resolved, dict):  # skill_error envelope
+        if isinstance(resolved, dict):  # app_error envelope
             return resolved
         resolved_port = resolved
     else:
         # Prefer an explicit port; otherwise read DevToolsActivePort.
         resolved_port = port if port is not None else _read_devtools_active_port()
     if resolved_port is None:
-        return skill_error(
+        return app_error(
             "Brave is not running with --remote-debugging-port. "
             "Quit Brave and relaunch it with the debug flag:\n\n"
             "    /Applications/Brave\\ Browser.app/Contents/MacOS/Brave\\ Browser "
@@ -305,7 +305,7 @@ async def cdp_connect(
 
     version = await _fetch_version(resolved_port)
     if version is None:
-        return skill_error(
+        return app_error(
             f"Found Brave debug port {resolved_port} but /json/version "
             f"failed. The browser may be frozen, or the protocol may "
             f"have drifted. Try restarting Brave.",
@@ -315,7 +315,7 @@ async def cdp_connect(
 
     ws_url = version.get("webSocketDebuggerUrl") or ""
     if not ws_url:
-        return skill_error(
+        return app_error(
             f"Brave responded on port {resolved_port} but omitted "
             f"webSocketDebuggerUrl. Unexpected — likely a Chromium "
             f"version incompatibility.",

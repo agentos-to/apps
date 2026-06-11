@@ -24,7 +24,7 @@ from agentos import (
     provides,
     returns,
     shell,
-    skill_secret,
+    app_secret,
 )
 
 connection(
@@ -136,7 +136,7 @@ async def get_credentials(
             continue
         attrs, pwd = hit
         email = normalize_email(attrs["acct"]) if "@" in attrs["acct"] else attrs["acct"]
-        secret = skill_secret(
+        secret = app_secret(
             domain=domain,
             identifier=email,
             item_type="login_credentials",
@@ -174,7 +174,7 @@ async def get_password(
         if not hit:
             continue
         _attrs, pwd = hit
-        secret = skill_secret(
+        secret = app_secret(
             domain=domain,
             identifier=account,
             item_type="password",

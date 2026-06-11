@@ -723,7 +723,7 @@ async def list_deliveries(cursor: str = "", **params) -> list:
                 "latitude": location.get("latitude"),
                 "longitude": location.get("longitude"),
             },
-            "shippingAddress": {
+            "shipped_to": {
                 "fullAddress": delivery_address_obj.get("eaterFormattedAddress") or raw_addr.get("eaterFormattedAddress"),
                 "latitude": delivery_loc.get("latitude") or location.get("latitude"),
                 "longitude": delivery_loc.get("longitude") or location.get("longitude"),
@@ -1965,7 +1965,7 @@ async def add_to_cart(store_uuid: str, items: list, delivery_address_uuid: str,
             }
             for i in final_items
         ],
-        "shippingAddress": {
+        "shipped_to": {
             "fullAddress": final_address_obj.get("eaterFormattedAddress") or final_address_obj.get("title"),
             "latitude": final_address.get("latitude"),
             "longitude": final_address.get("longitude"),

@@ -1,6 +1,6 @@
 ---
 id: brave-browser
-capabilities:
+services:
   - crypto
   - http
   - secrets

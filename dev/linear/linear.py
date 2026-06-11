@@ -356,7 +356,7 @@ async def get_cycles(*, team_id: str, **params) -> list:
 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
-@returns({"blocks": "array", "blockedBy": "array", "related": "array"})
+@returns({"blocks": "array", "blocked_by": "array", "related": "array"})
 async def get_relations(*, id: str, **params) -> dict:
     """Get an issue's relationships (blocking, blocked by, related).
 
@@ -384,7 +384,7 @@ async def get_relations(*, id: str, **params) -> dict:
     issue = data["issue"]
     return {
         "blocks": issue["relations"]["nodes"],
-        "blockedBy": issue["inverseRelations"]["nodes"],
+        "blocked_by": issue["inverseRelations"]["nodes"],
     }
 
 

@@ -32,7 +32,7 @@ staleness of Brave's disk DB becomes irrelevant.
 
 import json as _json
 
-from agentos import client, connection, returns, timeout, skill_secret, skill_result
+from agentos import client, connection, returns, timeout, app_secret, app_result
 
 
 connection(
@@ -262,14 +262,14 @@ def _flight_from_displayflight(f: dict, marketing: str = "UA") -> dict:
             "shape": "airline", "iataCode": marketing,
             "name": f.get("MarketingCarrierDescription") or marketing,
         },
-        "departsFrom": _airport_node_from_ua(
+        "departs_from": _airport_node_from_ua(
             iata=f.get("Origin"),
             name=f.get("OriginDescription"),
             country_code=f.get("OriginCountryCode"),
             state_code=f.get("OriginStateCode"),
             timezone_offset=f.get("OriginTimezoneOffset") or f.get("OrgTimezoneOffset"),
         ) or {"iataCode": f.get("Origin"), "name": f.get("Origin")},
-        "arrivesAt": _airport_node_from_ua(
+        "arrives_at": _airport_node_from_ua(
             iata=f.get("Destination"),
             name=f.get("DestinationDescription"),
             country_code=f.get("DestinationCountryCode"),
@@ -394,12 +394,12 @@ async def store_session_cookies(*, cookies: dict, **params) -> dict:
           Must include the auth-tier trio: AuthCookie, Session, User.
     """
     if not cookies:
-        return skill_result(error="cookies dict is required")
+        return app_result(error="cookies dict is required")
 
     needed = {"AuthCookie", "Session", "User"}
     missing = needed - set(cookies.keys())
     if missing:
-        return skill_result(error=f"missing required cookie(s): {sorted(missing)}")
+        return app_result(error=f"missing required cookie(s): {sorted(missing)}")
 
     cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
@@ -410,10 +410,10 @@ async def store_session_cookies(*, cookies: dict, **params) -> dict:
         cookies=cookie_header,
     )
     if mint.get("status") != 200:
-        return skill_result(error=f"anonymous-token mint failed: status={mint.get('status')}")
+        return app_result(error=f"anonymous-token mint failed: status={mint.get('status')}")
     bearer = ((mint.get("json") or {}).get("data") or {}).get("token", {}).get("hash")
     if not bearer:
-        return skill_result(error="anonymous-token mint returned no hash")
+        return app_result(error="anonymous-token mint returned no hash")
 
     # Verify the bearer is user-scoped by hitting /User/profile
     probe = await client.get(
@@ -426,7 +426,7 @@ async def store_session_cookies(*, cookies: dict, **params) -> dict:
         },
     )
     if probe.get("status") != 200:
-        return skill_result(
+        return app_result(
             error=(f"cookies validated as anonymous, not user-scoped "
                    f"(profile returned {probe.get('status')}). "
                    f"These cookies don't represent a logged-in session.")
@@ -440,10 +440,10 @@ async def store_session_cookies(*, cookies: dict, **params) -> dict:
     display_name = traveler.get("CustomerName") or ""
 
     if not mp_id:
-        return skill_result(error="profile returned 200 but no MileagePlusId")
+        return app_result(error="profile returned 200 but no MileagePlusId")
 
     return {
-        "__secrets__": [skill_secret(
+        "__secrets__": [app_secret(
             domain=".united.com",
             identifier=mp_id,
             item_type="cookie",
@@ -803,8 +803,8 @@ def _seg_to_leg(fs: dict) -> dict | None:
         "flightNumber": label,
         "departureTime": _parse_mytrips_datetime(seg.get("DepartureDateTime")),
         "arrivalTime":   _parse_mytrips_datetime(seg.get("ArrivalDateTime")),
-        "departsFrom":   _ap(seg.get("DepartureAirport")),
-        "arrivesAt":     _ap(seg.get("ArrivalAirport")),
+        "departs_from":   _ap(seg.get("DepartureAirport")),
+        "arrives_at":     _ap(seg.get("ArrivalAirport")),
         "airline":       _UNITED_ORG if marketing == "UA" else {
             "shape": "airline", "iataCode": marketing, "name": marketing,
         },
@@ -1143,14 +1143,14 @@ def _segment_to_flight(seg: dict) -> dict:
             "name": seg.get("marketingCarrierDescription") or "United Airlines",
             "url": "https://www.united.com" if marketing == "UA" else None,
         },
-        "departsFrom": _airport_node_from_ua(
+        "departs_from": _airport_node_from_ua(
             iata=seg.get("origin"),
             name=seg.get("originDescription"),
             country_code=seg.get("originCountryCode"),
             state_code=seg.get("originStateCode"),
             timezone_offset=seg.get("orgTimezoneOffset"),
         ) or {"iataCode": seg.get("origin"), "name": seg.get("origin")},
-        "arrivesAt": _airport_node_from_ua(
+        "arrives_at": _airport_node_from_ua(
             iata=seg.get("destination"),
             name=seg.get("destinationDescription"),
             country_code=seg.get("destinationCountryCode"),
@@ -1447,7 +1447,7 @@ async def search_flights(
                 "offerType": "award" if award else "revenue",
                 "availability": "available" if amount is not None else "unavailable",
                 "bookingToken": product_id,
-                "offeredBy": {
+                "offered_by": {
                     "shape": "airline",
                     "iataCode": "UA",
                     "name": "United Airlines",
@@ -2768,14 +2768,14 @@ async def render_seatmap(
 # blob prevents the agent from forging "I already asked and they said yes" —
 # the blob can only be minted by reading the live cart state.
 #
-# The HMAC key is stored in the engine's skill_secret credential store so it
+# The HMAC key is stored in the engine's app_secret credential store so it
 # persists across invocations but isn't readable by the agent directly.
 
 
 def _booking_hmac_key() -> bytes:
     """Fetch (or mint) the booking-blob signing key.
 
-    Tries the engine's skill_secret store first. If that's unavailable or
+    Tries the engine's app_secret store first. If that's unavailable or
     doesn't persist across calls (observed 2026-04-23), falls back to a
     file in ~/.agentos/united-booking-key. Both paths produce the same
     value for the life of the key file — so prepare_booking and
@@ -2783,9 +2783,9 @@ def _booking_hmac_key() -> bytes:
     same signature.
     """
     import os, secrets, pathlib
-    # Prefer skill_secret if it actually persists
+    # Prefer app_secret if it actually persists
     try:
-        k = skill_secret.get("booking_hmac_key")
+        k = app_secret.get("booking_hmac_key")
         if k:
             return k.encode("utf-8") if isinstance(k, str) else k
     except Exception:
@@ -2802,7 +2802,7 @@ def _booking_hmac_key() -> bytes:
     tmp.chmod(0o600)
     tmp.rename(key_path)
     try:
-        skill_secret.set("booking_hmac_key", new_key.decode("utf-8"))
+        app_secret.set("booking_hmac_key", new_key.decode("utf-8"))
     except Exception:
         pass
     return new_key
@@ -3403,9 +3403,9 @@ async def prepare_booking(
         # Relations populated as nested objects
         "trips": cart.get("trips") or [],
         "fares": fares,
-        "taxLines": tax_lines,
-        "paymentMethod": payment_method,
-        "billingAddress": billing_address,
+        "itemizes": tax_lines,
+        "paid_with": payment_method,
+        "billed_to": billing_address,
         "guests": [
             {
                 "shape": "person",

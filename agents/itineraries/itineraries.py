@@ -17,7 +17,7 @@ Design constraints (see _roadmap/p2/itineraries-skill.md):
   - US Letter portrait. One page per trip in `reservation.trips[]`.
   - Phase 1 uses a neutral graphite accent (#2B2F36). Phase 2 reads
     `reservation.at.primaryColor` from airline+brand mixin. Phase 3
-    introduces `brand_lookup` capability for discoverable brand data.
+    introduces `brand_lookup` service for discoverable brand data.
 """
 
 from __future__ import annotations

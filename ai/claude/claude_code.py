@@ -22,7 +22,7 @@ from pathlib import Path
 
 from agentos import shell, returns, timeout, connection, provides, client
 from agentos.macos import keychain
-from agentos.tools import llm
+from agentos.services import llm
 
 # Claude Code stores its OAuth token in the macOS keychain under this service.
 # The token has `user:inference` scope and can call /v1/models directly —

@@ -311,13 +311,13 @@ async def list_posts(url: str, limit: int = 50, **params) -> list[dict]:
                 str(c.get("timestamp", ""))[:8] if c.get("timestamp") else None
             ),
             "likes": c.get("like_count"),
-            "postedBy": {
+            "posted_by": {
                 "id": author_id,
                 "name": c.get("author"),
                 "url": c.get("author_url"),
                 "image": c.get("author_thumbnail"),
             } if author_id else None,
-            "repliesTo": {
+            "replies_to": {
                 "id": video_post_id if parent == "root" else parent,
             },
         }

@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from agentos import connection, provides, returns, shell, test, timeout, client
-from agentos.tools import llm
+from agentos.services import llm
 
 
 connection(

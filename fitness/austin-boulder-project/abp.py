@@ -27,8 +27,8 @@ from agentos import (
     credentials,
     normalize_email,
     returns,
-    skill_error,
-    skill_secret,
+    app_error,
+    app_secret,
     test,
 )
 
@@ -664,7 +664,7 @@ async def login(*, email: str = "", password: str = "", **params) -> dict[str, A
             password = password or val.get("password") or ""
 
     if not email or not password:
-        return skill_error(
+        return app_error(
             "Missing credentials for .approach.app. Add an ABP login "
             "item to 1Password / Keychain, or call login() with "
             "email= and password= directly.",
@@ -676,7 +676,7 @@ async def login(*, email: str = "", password: str = "", **params) -> dict[str, A
 
     result = await _cognito_initiate_auth(email, password)
     canonical = normalize_email(email)
-    secret = skill_secret(
+    secret = app_secret(
         domain=".approach.app",
         identifier=canonical,
         item_type="login_credentials",

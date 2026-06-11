@@ -24,8 +24,8 @@ from agentos import (
     provides,
     returns,
     shell,
-    skill_error,
-    skill_secret,
+    app_error,
+    app_secret,
     url,
 )
 
@@ -229,7 +229,7 @@ async def get_credentials(
     try:
         candidates = await _find_login_candidates(domain, account)
     except _OpLocked as e:
-        return skill_error(
+        return app_error(
             f"1Password vault is locked. Unlock the 1Password desktop app or run `op signin`, then retry. ({e})",
             code="OnePasswordLocked",
             help_url="https://developer.1password.com/docs/cli/get-started/#sign-in-to-your-account",
@@ -244,7 +244,7 @@ async def get_credentials(
         top_score = _score_item(candidates[0], domain)
         tied = [c for c in candidates if _score_item(c, domain) == top_score]
         if len(tied) > 1:
-            return skill_error(
+            return app_error(
                 f"Multiple 1Password items match {domain!r}. "
                 f"Retry with `account=` set to one of the listed usernames or titles.",
                 code="MultipleMatches",
@@ -257,7 +257,7 @@ async def get_credentials(
     try:
         item = await _op_json("item", "get", candidates[0]["id"])
     except _OpLocked as e:
-        return skill_error(
+        return app_error(
             f"1Password vault locked mid-request. ({e})",
             code="OnePasswordLocked",
         )
@@ -270,7 +270,7 @@ async def get_credentials(
         return {"provided": False}
 
     identifier = normalize_email(username) if "@" in username else username
-    secret = skill_secret(
+    secret = app_secret(
         domain=domain,
         identifier=identifier,
         item_type="login_credentials",
@@ -309,7 +309,7 @@ async def get_api_key(
     try:
         items = await _op_json("item", "list", "--categories", "API Credential")
     except _OpLocked as e:
-        return skill_error(
+        return app_error(
             f"1Password vault is locked. Unlock the 1Password desktop app or run `op signin`, then retry. ({e})",
             code="OnePasswordLocked",
             help_url="https://developer.1password.com/docs/cli/get-started/#sign-in-to-your-account",
@@ -327,7 +327,7 @@ async def get_api_key(
     try:
         item = await _op_json("item", "get", matching[0]["id"])
     except _OpLocked as e:
-        return skill_error(
+        return app_error(
             f"1Password vault locked mid-request. ({e})",
             code="OnePasswordLocked",
         )
@@ -338,7 +338,7 @@ async def get_api_key(
         return {"provided": False}
 
     identifier = (item.get("title") or service).strip()
-    secret = skill_secret(
+    secret = app_secret(
         domain=service,
         identifier=identifier,
         item_type="api_key",

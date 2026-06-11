@@ -2,7 +2,7 @@
 id: whatsapp
 name: WhatsApp
 description: WhatsApp messages, contacts, and sending via live WhatsApp Web
-capabilities:
+services:
   - blobs
 color: "#2CD46B"
 website: "https://www.whatsapp.com/"
@@ -16,7 +16,7 @@ product:
 
 Read and send WhatsApp messages through a live WhatsApp Web tab. Ops run as
 JS payloads in the engine-owned Brave instance via the `browser_session`
-capability — the engine holds the CDP session; this skill never sees the
+service — the engine holds the CDP session; this app never sees the
 protocol. WhatsApp's own code decrypts everything; the payloads read the
 in-page Store collections.
 
@@ -44,16 +44,35 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
 - **Group members:** `list_persons` with `conversation_id` (opens the chat
   to trigger WhatsApp's lazy participant load — takes a few seconds)
 - **Send:** `send_message` with `to` + `text`
-- **React:** `send_reaction` with `chat` + `emoji` (any Unicode emoji)
+- **Send media:** `send_media` with `to` + `path` (a blob-store path) +
+  optional `caption`; `ptt: true` sends an ogg/opus file as a voice note
+- **React:** `send_reaction` with `emoji` + either `chat` (latest
+  message) or `message_id` (that exact message)
+- **Show typing:** `send_typing` with `chat` right before a real send
+  (`kind: recording` for the mic indicator, `paused` to clear)
+- **Online dot:** `set_presence` with `state: available | unavailable`
+- **Deep search:** `search_messages` — WhatsApp's own server-side
+  search, full history; scope with `conversation_id`, walk pages with
+  `page`
 - **Mark read:** `mark_read` with `conversation_id` — read receipt +
   badge clear on every device. Reading a chat on the user's behalf
   isn't finished until this runs.
 
 ## Behavior notes
 
-- `search_messages` searches the **in-memory** Store — recent history per
-  chat, not the full archive. For deep history, `list_messages` the
-  conversation first to page more into memory.
+- `search_messages` runs **server-side** — the same index the Web UI's
+  search box hits, so results reach years back regardless of what's
+  loaded in memory. WhatsApp matches words/prefixes, not substrings.
+- `send_media` sends only from the engine's blob store: inbound media
+  hydrated by `get_message` is already there; stage new bytes with
+  `blobs.put`. Same 10MB eval-channel cap as inbound hydration, in the
+  opposite direction. Voice notes (`ptt: true`) need ogg/opus input.
+- Byte fidelity: WhatsApp's prep pipeline **re-encodes images** (sha
+  changes, pixels survive — verified 367×206 in/out); ogg/opus voice
+  notes pass through **byte-identical** (sha-verified round trip).
+- `send_typing` is honesty, not theater — fire it only when a real
+  send follows. WhatsApp's own decay clears it; `kind: paused` clears
+  it explicitly.
 - First op after an engine restart is slow (~10-30s): browser launch + page
   load + Store init. Warm ops run in well under a second.
 - Media messages map with `type` (`image`, `video`, `ptt`, …) and use the
@@ -96,9 +115,19 @@ Payloads use WhatsApp Web's module system: `WAWebCollections` (Chat / Msg /
 Contact), `WAWebChatLoadMessages.loadEarlierMsgs`, `WAWebSendMsgChatAction.
 addAndSendMsgToChat`, `WAWebSendReactionMsgAction.sendReactionToMsg`,
 `WAWebCmd.openChatAt`, `WAWebMsgKey.newId/fromString` (send ids),
-`WAWebUserPrefsMeUser.getMeUser` (login probe). Model fields carry the
-`__x_` prefix. If WhatsApp ships a breaking Web update, the whatsapp-web.js
-project is the reference for re-deriving module names and call shapes.
+`WAWebUserPrefsMeUser.getMeUser` (login probe),
+`WAWebChatStateBridge.sendChatStateComposing/Recording/Paused(wid)`
+(typing), `WAWebPresenceChatAction.sendPresenceAvailable/Unavailable()`
+(online dot), `Msg.search(query, page, count, remote)` (server-side
+search — positional args, 1-based page, `remote` = chat JID string or
+undefined), and the media-send pipeline `WAWebMediaOpaqueData.
+createFromData → WAWebPrepRawMedia.prepRawMedia → WAWebMediaStorage.
+getOrCreateMediaObject → WAWebMmsMediaTypes.msgToMediaType →
+WAWebMediaMmsV4Upload.uploadMedia → mediaData.set(entry) → spread
+`mediaData.toJSON()` into the full message construct`. Model fields
+carry the `__x_` prefix. If WhatsApp ships a breaking Web update, the
+whatsapp-web.js project is the reference for re-deriving module names
+and call shapes.
 
 Drift traps already survived (patterns to keep):
 

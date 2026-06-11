@@ -32,7 +32,7 @@ def _map_hit(hit: dict) -> dict:
         "published": hit.get("created_at"),
         "score": hit.get("points"),
         "commentCount": hit.get("num_comments"),
-        "postedBy": {
+        "posted_by": {
             "id": author,
             "name": author,
             "url": _user_url(author),
@@ -55,7 +55,7 @@ def _map_item(item: dict) -> dict:
             "url": _post_url(cid),
             "author": cauthor,
             "published": c.get("created_at"),
-            "postedBy": {
+            "posted_by": {
                 "id": cauthor,
                 "name": cauthor,
                 "url": _user_url(cauthor),
@@ -73,7 +73,7 @@ def _map_item(item: dict) -> dict:
         "published": item.get("created_at"),
         "score": item.get("points"),
         "commentCount": len(children),
-        "postedBy": {
+        "posted_by": {
             "id": author,
             "name": author,
             "url": _user_url(author),
@@ -137,8 +137,8 @@ async def get_post(id: str = None, url: str = None, **params) -> dict:
         if m:
             id = m.group(1)
     if not id:
-        from agentos import skill_error
-        return skill_error("Either id or url with id= parameter is required")
+        from agentos import app_error
+        return app_error("Either id or url with id= parameter is required")
 
     resp = await client.get(f"{BASE}/items/{id}")
 
@@ -170,7 +170,7 @@ async def comments_post(id: str, **params) -> list[dict]:
             "published": node.get("created_at"),
             "score": node.get("points"),
             "commentCount": len(node.get("children", [])),
-            "postedBy": {
+            "posted_by": {
                 "id": author,
                 "name": author,
                 "url": _user_url(author),

@@ -1,5 +1,5 @@
 from agentos import client, connection, provides, returns, timeout
-from agentos.tools import llm
+from agentos.services import llm
 
 
 connection(
