@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """
-Authenticated Goodreads web scraping — friends, books, shelves, reviews, search people.
+Goodreads viewer-scoped web data — friends, books, shelves, reviews, search people.
 
-Uses lxml for HTML parsing. Cookies come from the ``web`` connection's
-ambient jar; AgentOS seeds it from a logged-in browser's cookies.
-Separate from public_graph.py which handles public GraphQL/Apollo data.
+Browser-driven: every viewer-scoped page is fetched by a same-origin
+`fetch()` running *inside* the Goodreads tab of the engine-owned browser
+(the `browser_session` service — the WhatsApp/exa pattern). The session
+is the browser profile itself; the `.goodreads.com` cookie rides the
+fetch automatically because it's same-origin. No cookie connection, no
+vault row, no header injection — the HTML comes back as text and the
+lxml parsing below is unchanged.
+
+Separate from public_graph.py, which handles public GraphQL/Apollo data
+over the `graphql` connection (no session).
 """
 
+import json
 import re
 from typing import Any
 
 from agentos import (
     account,
     claims,
-    client,
     connection,
     email_lookup,
     molt,
@@ -23,6 +30,7 @@ from agentos import (
     parse_int,
     provides,
     returns,
+    services,
     test,
     timeout,
     url,
@@ -36,21 +44,34 @@ connection(
     description='Public AppSync GraphQL — API key auto-discovered from JS bundles',
     client='browser')
 
-connection(
-    'web',
-    description='Goodreads user cookies for viewer-scoped data (friends, shelves, books, reviews)',
-    base_url='https://www.goodreads.com',
-    client='browser',
-    auth={'type': 'cookies', 'domain': '.goodreads.com'},
-    label='Goodreads Session',
-    help_url='https://www.goodreads.com/user/sign_in',
-    optional=True)
-
 
 BASE = "https://www.goodreads.com"
 MAX_PAGES = 20
 PER_PAGE_FRIENDS = 30
 PER_PAGE_BOOKS = 25
+
+# browser_session target — a URL substring; the engine opens
+# https://www.goodreads.com/ in the engine-owned browser when no tab matches.
+_TARGET = "www.goodreads.com"
+
+# Fetch a Goodreads URL from inside the tab. Waits until the document has
+# settled on a goodreads.com origin (a freshly opened tab is at
+# about:blank, where a same-origin fetch can't carry the cookie), then
+# does the fetch. `r.url` reflects redirects — an unauthenticated request
+# lands on /user/sign_in, which the callers key on.
+_FETCH_JS = """(async () => {
+  const deadline = Date.now() + 15000;
+  while (location.hostname.indexOf('goodreads.com') === -1 || document.readyState !== 'complete') {
+    if (Date.now() > deadline) return { status: 0, body: '', url: location.href };
+    await new Promise(r => setTimeout(r, 200));
+  }
+  try {
+    const r = await fetch(%(url)s, { credentials: 'same-origin', redirect: 'follow' });
+    return { status: r.status, body: await r.text(), url: r.url };
+  } catch (e) {
+    return { status: 0, body: '', url: %(url)s, error: String(e) };
+  }
+})()"""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,9 +96,27 @@ def _text(el: HtmlElement | None) -> str:
     return (el.text_content() or "").strip()
 
 
+async def _get(target_url: str) -> dict[str, Any]:
+    """GET a Goodreads URL through the engine-owned browser's tab.
+
+    Returns the `client.get`-shaped dict the parsers already expect:
+    `{status, body, url}`. The fetch is same-origin in the Goodreads
+    tab, so the viewer's session cookie rides it; nothing reaches this
+    app but the resulting HTML.
+    """
+    result = await services.call(services.browser_session, params={
+        "target": _TARGET,
+        "js": _FETCH_JS % {"url": json.dumps(target_url)},
+        "timeout": 30,
+    })
+    if not isinstance(result, dict):
+        return {"status": 0, "body": "", "url": target_url}
+    return result
+
+
 async def _fetch(target_url: str) -> tuple[int, str]:
-    resp = await client.get(target_url)
-    return resp["status"], resp["body"]
+    resp = await _get(target_url)
+    return resp.get("status", 0), resp.get("body", "")
 
 
 def _has_next(html_text: str) -> bool:
@@ -144,7 +183,7 @@ _GOODREADS = {"shape": "organization", "url": "https://goodreads.com", "name": "
 @account.check
 @returns("account")
 @claims("primary_user")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def check_session(**params) -> dict[str, Any]:
     """Verify Goodreads session and identify the logged-in user by email.
@@ -155,7 +194,7 @@ async def check_session(**params) -> dict[str, Any]:
     slug, then follows up with `/user/edit` for the canonical email.
     """
 
-    resp = await client.get(BASE)
+    resp = await _get(BASE)
 
     # Non-200 or sign-in redirect → cookies are dead.
     if resp["status"] != 200 or "/user/sign_in" in str(resp["url"]):
@@ -173,7 +212,7 @@ async def check_session(**params) -> dict[str, Any]:
     # on the "Alert emails will be sent to <em>...</em>" notice. Reachable
     # only when session cookies are valid — anonymous visitors are
     # redirected to /user/sign_in long before this markup appears.
-    edit_resp = await client.get(f"{BASE}/user/edit")
+    edit_resp = await _get(f"{BASE}/user/edit")
     em = re.search(
         r'Alert emails will be sent to\s*<em>\s*([^<\s]+@[^<\s]+)\s*</em>',
         edit_resp["body"],
@@ -203,7 +242,7 @@ async def check_session(**params) -> dict[str, Any]:
 
 @test
 @returns("person")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def get_person(*, user_id: str = "", **params) -> dict[str, Any]:
     """Get a rich person profile from Goodreads — demographics, stats, favorite books, genres, currently reading
@@ -216,7 +255,7 @@ async def get_person(*, user_id: str = "", **params) -> dict[str, Any]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("person[]")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def search_people(*, query: str = "", limit: int = 10, **params) -> list[dict[str, Any]]:
     """Search for Goodreads users by name
@@ -238,7 +277,7 @@ async def _resolve_user_id(user_id: str, params: dict) -> str:
     uid = str(user_id).strip() if user_id else ""
     if uid:
         return uid
-    resp = await client.get(BASE)
+    resp = await _get(BASE)
     m = re.search(r'/user/show/(\d+)', resp["body"])
     if m:
         return m.group(1)
@@ -250,7 +289,7 @@ async def _resolve_user_id(user_id: str, params: dict) -> str:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("person[]")
-@connection("web")
+@connection("none")
 @timeout(60)
 async def list_friends(*, user_id: str = "", page: int = 0, **params) -> list[dict[str, Any]]:
     """List a user's friends as people with linked Goodreads accounts
@@ -264,7 +303,7 @@ async def list_friends(*, user_id: str = "", page: int = 0, **params) -> list[di
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("book[]")
-@connection("web")
+@connection("none")
 @timeout(60)
 async def list_books(*, user_id: str = "", shelf: str = "all", sort: str = "date_added", page: int = 0, **params) -> list[dict[str, Any]]:
     """List a user's books organized by shelf (requires Goodreads session cookies)
@@ -280,7 +319,7 @@ async def list_books(*, user_id: str = "", shelf: str = "all", sort: str = "date
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("review[]")
-@connection("web")
+@connection("none")
 @timeout(60)
 async def list_reviews(*, user_id: str = "", sort: str = "date", page: int = 0, **params) -> list[dict[str, Any]]:
     """List your book reviews with ratings and dates (requires Goodreads session cookies)
@@ -295,7 +334,7 @@ async def list_reviews(*, user_id: str = "", sort: str = "date", page: int = 0, 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("shelf[]")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def list_shelves(*, user_id: str = "", **params) -> list[dict[str, Any]]:
     """List a user's bookshelves including default shelves (read, currently-reading, want-to-read)
@@ -308,7 +347,7 @@ async def list_shelves(*, user_id: str = "", **params) -> list[dict[str, Any]]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("book[]")
-@connection("web")
+@connection("none")
 @timeout(60)
 async def list_shelf_books(*, user_id: str = "", shelf_name: str = "", page: int = 0, **params) -> list[dict[str, Any]]:
     """List books on a specific user shelf (requires Goodreads session cookies)
@@ -324,7 +363,7 @@ async def list_shelf_books(*, user_id: str = "", shelf_name: str = "", page: int
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("person[]")
 @provides(email_lookup)
-@connection("web")
+@connection("none")
 @timeout(15)
 async def resolve_email(*, email: str = "", **params) -> list[dict[str, Any]]:
     """Look up a person on Goodreads by email address
@@ -337,7 +376,7 @@ async def resolve_email(*, email: str = "", **params) -> list[dict[str, Any]]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("group[]")
-@connection("web")
+@connection("none")
 async def list_groups(**params) -> list[dict[str, Any]]:
     """List the authenticated user's Goodreads groups"""
     return await _list_groups(params=params)
@@ -345,7 +384,7 @@ async def list_groups(**params) -> list[dict[str, Any]]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("person[]")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def list_following(*, user_id: str = "", **params) -> list[dict[str, Any]]:
     """List people (users and authors) a user is following
@@ -358,7 +397,7 @@ async def list_following(*, user_id: str = "", **params) -> list[dict[str, Any]]
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("person[]")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def list_followers(*, user_id: str = "", **params) -> list[dict[str, Any]]:
     """List people following a user
@@ -371,7 +410,7 @@ async def list_followers(*, user_id: str = "", **params) -> list[dict[str, Any]]
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("quote[]")
-@connection("web")
+@connection("none")
 @timeout(15)
 async def list_quotes(*, user_id: str = "", **params) -> list[dict[str, Any]]:
     """List a user's liked/saved quotes with author attribution
@@ -394,7 +433,7 @@ async def _get_person(
 ) -> dict[str, Any]:
     """Scrape a full Goodreads profile page and return rich person data."""
     u = f"{BASE}/user/show/{user_id}"
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Profile page returned {status}")
@@ -741,7 +780,7 @@ async def _list_friends(
     """
 
     if page > 0:
-        resp = await client.get(f"{BASE}/friend/user/{user_id}?page={page}")
+        resp = await _get(f"{BASE}/friend/user/{user_id}?page={page}")
         status, html_text = resp["status"], resp["body"]
         if status != 200:
             raise RuntimeError(f"Friends page returned {status}")
@@ -780,7 +819,7 @@ async def _search_people(
     params: dict | None = None,
 ) -> list[dict[str, Any]]:
     u = url.build(f"{BASE}/search", params={"q": query, "search_type": "people"})
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Search returned {status}")
@@ -911,7 +950,7 @@ async def _list_shelves(
     params: dict | None = None,
 ) -> list[dict[str, Any]]:
     u = f"{BASE}/user/show/{user_id}"
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Profile returned {status}")
@@ -1200,7 +1239,7 @@ async def _list_groups(
 ) -> list[dict[str, Any]]:
     """List the authenticated user's groups."""
     u = f"{BASE}/group?tab=my_groups"
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Groups page returned {status}")
@@ -1304,7 +1343,7 @@ async def _list_following(
 ) -> list[dict[str, Any]]:
     """List accounts (users + authors) the user is following."""
     u = f"{BASE}/user/{user_id}/following"
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Following page returned {status}")
@@ -1328,7 +1367,7 @@ async def _list_followers(
 ) -> list[dict[str, Any]]:
     """List accounts following the user."""
     u = f"{BASE}/user/{user_id}/followers"
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Followers page returned {status}")
@@ -1357,7 +1396,7 @@ async def _list_quotes(
 ) -> list[dict[str, Any]]:
     """List a user's liked/saved quotes."""
     u = f"{BASE}/quotes/list/{user_id}"
-    resp = await client.get(u)
+    resp = await _get(u)
     status, html_text = resp["status"], resp["body"]
     if status != 200:
         raise RuntimeError(f"Quotes page returned {status}")
