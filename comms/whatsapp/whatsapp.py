@@ -220,6 +220,36 @@ async def get_conversation(*, id, **params):
     """)
 
 
+@returns("conversation")
+@timeout(60)
+async def mark_read(*, conversation_id, **params):
+    """Mark a conversation read — the human-world side of reading.
+
+    Sends WhatsApp's own read receipt (the action the UI fires when a
+    chat is opened): the counterparty sees blue ticks per their privacy
+    settings, and the unread badge clears on every linked device.
+    Reading a chat on the user's behalf isn't finished until this runs.
+
+    Args:
+        conversation_id: Chat JID or name substring.
+    """
+    return await _eval(f"""
+    const chat = findChat({json.dumps(conversation_id)});
+    if (!chat) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(conversation_id)} }};
+    // Mirror the UI's mark-as-read exactly: clear the manual
+    // marked-unread flag (the source of unreadCount: -1), then send
+    // the receipt — which also zeroes a real unread count. sendSeen
+    // takes an options object with a `chat` key, NOT the bare model
+    // whatsapp-web.js passes; afterAvailable: false sends through the
+    // headless tab's "unavailable" stream instead of deferring the
+    // receipt until the tab becomes visible (which it never does).
+    chat.markedUnread = false;
+    await window.require('WAWebUpdateUnreadChatAction')
+      .sendSeen({{ chat, afterAvailable: false }});
+    return mapChat(chat);
+    """)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Messages
 # ──────────────────────────────────────────────────────────────────────

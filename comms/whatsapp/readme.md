@@ -43,6 +43,9 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
   to trigger WhatsApp's lazy participant load — takes a few seconds)
 - **Send:** `send_message` with `to` + `text`
 - **React:** `send_reaction` with `chat` + `emoji` (any Unicode emoji)
+- **Mark read:** `mark_read` with `conversation_id` — read receipt +
+  badge clear on every device. Reading a chat on the user's behalf
+  isn't finished until this runs.
 
 ## Behavior notes
 
@@ -104,3 +107,15 @@ Drift traps already survived (patterns to keep):
   per-chat list (locally-sent messages land there first).
 - For media, `__x_body` holds the preview thumbnail base64 — text lives in
   `__x_caption` only.
+- **`sendSeen` takes an options object** (`{chat, threadId?,
+  afterAvailable?}`), NOT the bare chat model whatsapp-web.js passes —
+  passing the model throws `Cannot read properties of undefined
+  (reading 'markedUnread')`.
+- **Headless tabs defer read receipts**: `Stream.available` is false
+  while the tab is hidden, and `sendSeen` parks the receipt until the
+  tab becomes visible — which a headless tab never does. Pass
+  `afterAvailable: false` to send through the unavailable stream
+  immediately (`mark_read` does).
+- **`unreadCount: -1` is the manual marked-unread flag**, not a count.
+  The UI's mark-as-read clears `chat.markedUnread = false` *then* sends
+  seen; `sendSeen` alone early-returns while the flag is set.
