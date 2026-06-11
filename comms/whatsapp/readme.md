@@ -1,7 +1,7 @@
 ---
 id: whatsapp
 name: WhatsApp
-description: WhatsApp messages, contacts, and sending via live WhatsApp Web
+description: Full WhatsApp presence via live WhatsApp Web — read, send text and media, react, show typing, search the full server-side history
 services:
   - blobs
 color: "#2CD46B"
