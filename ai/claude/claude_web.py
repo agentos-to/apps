@@ -63,22 +63,13 @@ async def _get_organizations():
 async def _resolve_org_uuid(org_uuid=None):
     """Resolve the org UUID for chat operations.
 
-    Priority: explicit org_uuid > lastActiveOrg cookie (probed) >
-    /api/organizations. The lastActiveOrg cookie can be stale, so we
-    probe with ?limit=1 before trusting it.
+    Priority: explicit org_uuid > /api/organizations. (The former
+    lastActiveOrg-cookie fast path is gone — cookie auth is retired and
+    the SDK no longer exposes an ambient Jar to read it from.)
     """
     if org_uuid:
         return org_uuid
-    # Try lastActiveOrg cookie — probe with ?limit=1 before trusting.
-    last_active = client.cookie("lastActiveOrg")
-    if last_active and re.match(r'^[0-9a-fA-F-]{36}$', last_active):
-        probe = await _get(
-            f"{BASE_URL}/api/organizations/{last_active}"
-            f"/chat_conversations?limit=1"
-        )
-        if probe["status"] == 200:
-            return last_active
-    # Slow path: fetch all orgs, find chat-capable one.
+    # Fetch all orgs, find chat-capable one.
     orgs = await _get_organizations()
     for org in orgs:
         if "chat" in org.get("capabilities", []):

@@ -7,7 +7,6 @@ params["auth"]["access_token"], injected by the engine from OAuth resolution.
 import base64
 import json
 import re
-import time
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -19,20 +18,6 @@ connection(
     base_url='https://gmail.googleapis.com/gmail/v1/users/me',
     domain='gmail.googleapis.com',
     auth={'type': 'oauth', 'service': 'google', 'scopes': ['https://mail.google.com/']})
-
-
-connection(
-    'sync',
-    base_url='https://mail.google.com',
-    domain='mail.google.com',
-    client='fetch',
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # mail.google.com tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py. (Gmail's oauth path
-    # is unaffected — this is only the cookie 'sync' connection.)
-    auth={'type': 'cookies', 'domain': '.google.com', 'names': ['SID', 'HSID', 'SSID', 'OSID', '__Secure-1PSID', '__Secure-3PSID']})
 
 
 BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -766,81 +751,6 @@ async def unsubscribe_email(*, id, **params):
         "subject": email.get("name"),
         "threadId": email.get("conversation_id"),
         "messageId": email.get("message_id"),
-    }
-
-
-# ==============================================================================
-# Gmail sync protocol (cookie-authenticated)
-# ==============================================================================
-
-# Gmail's internal label identifiers for unsubscribe state.
-# Discovered via CDP capture of Gmail's web UI unsubscribe flow.
-_CATEGORY_TO_SMARTLABEL = {
-    "CATEGORY_PROMOTIONS": "^smartlabel_promo",
-    "CATEGORY_UPDATES": "^smartlabel_notification",
-    "CATEGORY_SOCIAL": "^smartlabel_social",
-    "CATEGORY_FORUMS": "^smartlabel_group",
-    "CATEGORY_PERSONAL": "^smartlabel_personal",
-}
-
-SYNC_BASE = "https://mail.google.com/sync/u/0/i/s"
-
-
-@returns({"status": "string", "threadId": "string"})
-@connection("sync")
-@timeout(15)
-async def sync_unsubscribe(*, msg_id, thread_id, message_id_header="", label_ids=None, **params):
-    """Record an unsubscribe in Gmail's internal state via the sync protocol.
-
-    Applies ^punsub (unsubscribed) and ^punsub_sat (satisfied) internal labels
-    to a thread. This is exactly what Gmail's web UI does when you click the
-    Unsubscribe button — it makes the 'You unsubscribed' banner appear and
-    hides the Unsubscribe link on future emails from that sender.
-
-    Uses the 'sync' connection (cookie-auth from browser), not OAuth.
-    Call this AFTER unsubscribe_email to complete the full unsubscribe flow.
-    """
-    thread_ref = f"thread-f:{thread_id}"
-    msg_ref = f"msg-f:{msg_id}"
-
-    # Map Gmail label IDs to internal smartlabel refs
-    smartlabel_refs = []
-    for lid in (label_ids or []):
-        if lid in _CATEGORY_TO_SMARTLABEL:
-            smartlabel_refs.append(_CATEGORY_TO_SMARTLABEL[lid])
-
-    now_ms = int(time.time() * 1000)
-    payload = [
-        None,
-        [[[99, [thread_ref, [
-            None, None, None, None, None, None,
-            [
-                ["^punsub", "^punsub_sat"],
-                None,
-                [msg_ref],
-                None, None, None, None, None, None, None, None,
-                [None, [message_id_header] if message_id_header else [], smartlabel_refs]
-            ]
-        ]]]]],
-        [1, 0, None, None, [None, 0], None, 1],
-        [now_ms, 1, now_ms + 100, 0, 47],
-        2
-    ]
-
-    resp = await client.post(
-        SYNC_BASE,
-        params={"hl": "en", "c": "0", "rt": "r", "pt": "ji"},
-        json=payload,
-    )
-
-    status_code = resp.get("status", 0)
-    if status_code != 200:
-        return {"status": "failed", "statusCode": status_code}
-
-    return {
-        "status": "synced",
-        "threadId": thread_id,
-        "labelsApplied": ["^punsub", "^punsub_sat"],
     }
 
 

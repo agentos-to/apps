@@ -826,19 +826,15 @@ async def grep_page_chunks(*, page: str, patterns: list = None, context: int = 8
 @connection("dashboard")
 @timeout(10)
 async def inspect_auth(**params) -> dict:
-    """Debug: report what the ambient Jar is carrying for this tool call.
+    """Debug: report the ambient cookie state for this tool call.
 
-    Reads ``client.current().jar.cookies`` — the structured Cookie records
-    the engine seeded at tool entry. No cookie values returned, only names
-    and domains, so the output is safe to paste into logs.
+    Cookie auth is retired — the engine no longer seeds an ambient Jar,
+    so there are no SDK-side cookies to inspect. Always reports empty.
+    Migrate greptile to browser-driven auth (browser-session-store) and
+    drop this helper. Template: apps/web/exa/exa.py.
     """
-    ambient = client.current()
-    jar = ambient.jar if ambient else None
-    cookies = list(jar.cookies) if jar else []
-    names = [c.name for c in cookies]
-    domains = sorted({c.domain for c in cookies})
     return {"__result__": {
-        "cookie_names": names,
-        "cookie_count": len(cookies),
-        "domains": domains,
+        "cookie_names": [],
+        "cookie_count": 0,
+        "domains": [],
     }}
