@@ -1,6 +1,6 @@
 ---
 id: mimestream
-capabilities:
+services:
 - http
 - plist
 - secrets

@@ -1,6 +1,6 @@
 ---
 id: spacex
-capabilities:
+services:
 - http
 name: SpaceX
 description: "SpaceX launch data \u2014 upcoming, past, and individual launch details"

@@ -1,6 +1,6 @@
 ---
 id: granola
-capabilities:
+services:
   - http
 name: Granola
 description: "Meeting transcripts, AI summaries, and Q&A conversations from Granola"

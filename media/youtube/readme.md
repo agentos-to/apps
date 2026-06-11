@@ -1,6 +1,6 @@
 ---
 id: youtube
-capabilities:
+services:
 - http
 name: YouTube
 description: Get video metadata and transcripts using yt-dlp

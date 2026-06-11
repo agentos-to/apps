@@ -1,6 +1,6 @@
 ---
 id: git
-capabilities:
+services:
   - shell
 name: Git
 description: "Local git repository data — commits, branches, tags, and repo info"

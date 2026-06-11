@@ -2,7 +2,7 @@
 id: reverse-engineering
 name: reverse-engineering
 description: Systematically analyze and document how software systems work internally. Use when you need to understand closed-source systems, third-party integrations, or undocumented APIs.
-capabilities:
+services:
   - http
 color: "#4a2a6b"
 ---

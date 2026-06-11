@@ -1,6 +1,6 @@
 ---
 id: brave
-capabilities:
+services:
   - http
 name: Brave Search
 description: Privacy-focused web search with independent index

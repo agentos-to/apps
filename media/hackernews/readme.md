@@ -1,6 +1,6 @@
 ---
 id: hackernews
-capabilities:
+services:
   - http
 name: Hacker News
 description: "Read Hacker News stories, comments, and discussions"

@@ -1,6 +1,6 @@
 ---
 id: exa
-capabilities:
+services:
 - http
 name: Exa
 description: Semantic web search and content extraction

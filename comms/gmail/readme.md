@@ -1,6 +1,6 @@
 ---
 id: gmail
-capabilities:
+services:
   - http
 name: Gmail
 description: "Full-featured Gmail — read, search, send, reply, forward, label, archive, draft, attachments, filters, and batch operations. Auth can use the shared `google` OAuth capability when a provider integration is available."

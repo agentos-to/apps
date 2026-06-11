@@ -1,6 +1,6 @@
 ---
 id: austin-boulder-project
-capabilities:
+services:
   - http
 name: Austin Boulder Project
 description: Class schedules and bookings for the Austin Bouldering Project gym

@@ -1,6 +1,6 @@
 ---
 id: openrouter
-capabilities:
+services:
 - http
 name: OpenRouter
 description: Unified AI gateway for models across providers via one API

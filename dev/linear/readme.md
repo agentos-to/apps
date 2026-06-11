@@ -1,6 +1,6 @@
 ---
 id: linear
-capabilities:
+services:
 - http
 name: Linear
 description: Project management for engineering teams

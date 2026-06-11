@@ -1,6 +1,6 @@
 ---
 id: united
-capabilities:
+services:
 - http
 name: United Airlines
 description: Flight search, reservations, boarding passes, travel history, and MileagePlus account access

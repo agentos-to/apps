@@ -1,6 +1,6 @@
 ---
 id: google-calendar
-capabilities:
+services:
 - http
 name: Google Calendar
 description: "Read, create, update, and delete Google Calendar events \u2014 replaces\

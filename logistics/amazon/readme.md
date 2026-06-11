@@ -1,6 +1,6 @@
 ---
 id: amazon
-capabilities:
+services:
 - http
 name: Amazon
 description: Search products, get details, and access your Amazon account

@@ -1,6 +1,6 @@
 ---
 id: onepassword
-capabilities:
+services:
   - shell
 name: 1Password
 description: >

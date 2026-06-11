@@ -1,6 +1,6 @@
 ---
 id: greptile
-capabilities:
+services:
 - http
 name: Greptile
 description: "AI code review and codebase search \u2014 organization and member management\

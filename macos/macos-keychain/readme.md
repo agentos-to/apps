@@ -1,6 +1,6 @@
 ---
 id: macos-keychain
-capabilities:
+services:
   - shell
 name: macOS Keychain
 description: >

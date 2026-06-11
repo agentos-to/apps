@@ -1,6 +1,6 @@
 ---
 id: imessage
-capabilities:
+services:
   - shell
   - sql
 name: iMessage

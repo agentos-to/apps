@@ -1,6 +1,6 @@
 ---
 id: ollama
-capabilities:
+services:
 - http
 - shell
 name: Ollama

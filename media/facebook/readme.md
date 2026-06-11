@@ -1,6 +1,6 @@
 ---
 id: facebook
-capabilities:
+services:
 - http
 - shell
 name: Facebook

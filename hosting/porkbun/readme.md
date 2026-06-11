@@ -1,6 +1,6 @@
 ---
 id: porkbun
-capabilities:
+services:
 - http
 name: Porkbun
 description: Domain and DNS management via the Porkbun API

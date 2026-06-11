@@ -1,6 +1,6 @@
 ---
 id: uber
-capabilities:
+services:
 - http
 name: Uber
 description: Ride history, trip details, Eats order history, and account info from

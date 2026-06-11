@@ -3,7 +3,7 @@ id: itineraries
 name: Itineraries
 description: Render travel itineraries (flights, lodging, rentals, dining) from graph `reservation` nodes — PDF, markdown, text.
 color: '#1f5f99'
-capabilities:
+services:
   - http
 tools:
   list:

@@ -1,6 +1,6 @@
 ---
 id: moltbook
-capabilities:
+services:
 - http
 name: Moltbook
 description: Read and publish Moltbook posts, comments, feeds, communities, and agent

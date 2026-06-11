@@ -1,6 +1,6 @@
 ---
 id: here-now
-capabilities:
+services:
   - http
 name: here.now
 description: "Publish static websites instantly — HTML, images, PDFs — no account needed"

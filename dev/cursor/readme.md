@@ -1,6 +1,6 @@
 ---
 id: cursor
-capabilities:
+services:
   - http
   - shell
   - sql

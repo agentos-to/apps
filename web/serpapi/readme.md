@@ -1,6 +1,6 @@
 ---
 id: serpapi
-capabilities:
+services:
 - http
 name: SerpAPI
 description: "Google search results API \u2014 flights, hotels, web search, and more"

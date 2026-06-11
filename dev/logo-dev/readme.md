@@ -1,6 +1,6 @@
 ---
 id: logo-dev
-capabilities:
+services:
   - http
 name: Logo.dev
 description: "Company logos via CDN - lookup by domain, ticker, or name"

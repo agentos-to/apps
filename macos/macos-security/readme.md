@@ -1,6 +1,6 @@
 ---
 id: macos-security
-capabilities:
+services:
   - shell
   - sql
 name: macOS Security

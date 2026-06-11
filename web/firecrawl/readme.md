@@ -1,6 +1,6 @@
 ---
 id: firecrawl
-capabilities:
+services:
   - http
 name: Firecrawl
 description: Read webpages with browser rendering for JS-heavy sites

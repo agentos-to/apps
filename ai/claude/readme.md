@@ -1,6 +1,6 @@
 ---
 id: claude
-capabilities:
+services:
 - http
 - secrets
 - shell

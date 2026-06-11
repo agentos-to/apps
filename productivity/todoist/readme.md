@@ -1,6 +1,6 @@
 ---
 id: todoist
-capabilities:
+services:
 - http
 name: Todoist
 description: Personal task management

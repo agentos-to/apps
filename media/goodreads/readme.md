@@ -1,6 +1,6 @@
 ---
 id: goodreads
-capabilities:
+services:
 - http
 name: Goodreads
 description: Read your Goodreads profile, books, reviews, friends, and activity

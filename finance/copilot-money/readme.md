@@ -1,6 +1,6 @@
 ---
 id: copilot-money
-capabilities:
+services:
 - sql
 name: Copilot Money
 description: Read accounts, transactions, and balance history from Copilot Money,

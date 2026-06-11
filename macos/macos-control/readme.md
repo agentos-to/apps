@@ -1,6 +1,6 @@
 ---
 id: macos-control
-capabilities:
+services:
 - shell
 name: macOS Control
 description: Inspect macOS apps, processes, displays, windows, screenshots, and filesystem

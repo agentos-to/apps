@@ -1,6 +1,6 @@
 ---
 id: reddit
-capabilities:
+services:
 - http
 name: Reddit
 description: Read public Reddit communities, posts, and comments

@@ -1,6 +1,6 @@
 ---
 id: google-contacts
-capabilities:
+services:
 - http
 name: Google Contacts
 description: Read, search, create, and update Google Contacts via the People API

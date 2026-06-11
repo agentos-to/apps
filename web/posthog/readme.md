@@ -1,6 +1,6 @@
 ---
 id: posthog
-capabilities:
+services:
 - http
 name: PostHog
 description: "Product analytics \u2014 events, persons, and session recordings"
