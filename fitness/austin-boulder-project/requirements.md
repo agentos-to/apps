@@ -12,14 +12,14 @@ The portal is a React SPA built on the **Tilefive** platform (`approach.app`).
 - `login` / `refresh_tokens` — Cognito `USER_PASSWORD_AUTH` flow implemented, awaiting credential test
 - `book_class`, `cancel_booking`, `get_my_memberships`, `get_my_passes` — implemented from bundle analysis
 - `discover_config` — dynamic API key + Cognito config extraction from app bundle with fallback constants
-- `readme.md` skill YAML — all operations defined, `auth: none` for public schedule, credential-gated for booking
-- `docs/building-web-skills.md` — key learnings (httpx/http2, JA4 fingerprinting, Sec-Fetch headers) captured for future skills
+- `readme.md` app YAML — all operations defined, `auth: none` for public schedule, credential-gated for booking
+- key transport learnings (httpx/http2, JA4 fingerprinting, Sec-Fetch headers) captured in the platform RE docs (`platform/docs/src/content/docs/apps/reverse-engineering/1-transport.md`)
 
 ### 🔴 Blocked: MCP spawn error
-`run({ skill: "austin-boulder-project", tool: "get_schedule" })` via MCP fails with
+`run({ app: "austin-boulder-project", tool: "get_schedule" })` via MCP fails with
 `"Failed to spawn process: No such file or directory"`. Likely cause: `working_dir: .`
 in the YAML command block resolves unexpectedly, or `python3` is not in the engine daemon's PATH.
-Other skills (kitty, granola) use the same pattern — diff against one of those to find the fix.
+Other apps (kitty, granola) use the same pattern — diff against one of those to find the fix.
 
 ### 📋 Needs credentials
 - `login(email, password)` — needs a real ABP account to verify Cognito flow end-to-end

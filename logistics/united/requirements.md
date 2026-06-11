@@ -29,7 +29,7 @@ When a POST to united.com returns **HTTP 200 + `Content-Type: application/x-ndjs
 - Malformed bodies return 400/500 with an error envelope.
 - Reproduces even when **the same request is fired via `Runtime.evaluate` from inside the real Brave tab** (same JA4, same cookies, same everything).
 
-**Implication for our skill**: don't replay POSTs against booking/state-change endpoints from Python urllib/http.client. Either:
+**Implication for our app**: don't replay POSTs against booking/state-change endpoints from Python urllib/http.client. Either:
 1. Use `agentos.client` with `client="browser"` (bundles UA + Sec-CH-UA + Sec-Fetch-*); if the engine has wreq/BoringSSL support that's better still.
 2. Drive the actual clicks via CDP on a live Brave session and **intercept** the XHR via `Fetch.enable` patterns — we read the real body the browser sent and the real response the browser got.
 
@@ -107,8 +107,8 @@ Useful for session-health check.
 | POST?  | `/api/auth/SubmitSecurityQuestionsResponses` | 2FA submit |
 
 Plan: **never implement signin** — rely on cookie auth from Brave
-(`brave-browser` provider), same pattern as Uber/Amazon skills. If session
-expires, the skill returns `SESSION_EXPIRED:` and the engine retries with
+(`brave-browser` provider), same pattern as the Uber/Amazon apps. If session
+expires, the app returns `SESSION_EXPIRED:` and the engine retries with
 fresher cookies.
 
 ## Read endpoints
@@ -185,7 +185,7 @@ bearer + cookies.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/xapi/myunited/memberlinkage` | Linked profiles. Returns `{status:"Failure", errors:[{code:"404","message":"Consent not found"}]}` when the user hasn't opted into family linkage — NOT an error, just "absent". Skill should treat as empty set. |
+| GET | `/xapi/myunited/memberlinkage` | Linked profiles. Returns `{status:"Failure", errors:[{code:"404","message":"Consent not found"}]}` when the user hasn't opted into family linkage — NOT an error, just "absent". App should treat as empty set. |
 
 ### Profile preferences (captured, not yet explored)
 
@@ -231,7 +231,7 @@ Business) as an edge value. Multiple addresses = multiple edges.
 
 Since United's API only gives us `Number` + `Type: "K"` without telling
 us WHICH program issued it, we can't distinguish PreCheck vs Global
-Entry from United alone. A future skill (e.g. `tsa` skill or a Global
+Entry from United alone. A future app (e.g. a `tsa` app or a Global
 Entry lookup) could enrich. For now, surface it as `Known Traveler
 Number` with tier = null.
 
@@ -254,7 +254,7 @@ Accept: text/event-stream  (response is SSE)
 **Response is a Server-Sent Events stream** (Content-Type isn't `application/json`;
 each line is `data: <json>\n\n`). A CDP `getResponseBody` on a finished SSE
 request often returns empty — you must tee the stream while it's in flight
-(in the skill: read line-by-line from the HTTP response).
+(in the app: read line-by-line from the HTTP response).
 
 ### Deep-link URL (drives the React SPA to fire the search automatically)
 
@@ -528,7 +528,7 @@ TBD: start a round-trip search fresh, carefully click outbound, observe.
 
 ### Sidecar calls fired alongside Register (same click)
 
-These are display/upsell enrichment — the skill does NOT need to call them to book:
+These are display/upsell enrichment — the app does NOT need to call them to book:
 
 | Method | Path | Body summary | Purpose |
 |--------|------|--------------|---------|
@@ -911,7 +911,7 @@ separate session when we actually book something.
   causes United to fire `GET /api/auth/signout` (clearing `AuthCookie`,
   `User`, `SID`) and returns 403 on the subsequent
   `/api/ShoppingCart/LoadReservationAndCart`. The cart survives (URL still
-  has the cart ID), but the session is cooked. **The skill MUST run the
+  has the cart ID), but the session is cooked. **The app MUST run the
   booking flow (register → traveler → offers → seats → checkout) without
   long pauses.** Inspection/probing must happen either before starting,
   or after PNR generation.
@@ -1199,7 +1199,7 @@ After several false starts, this sequence worked end-to-end:
 
 ## Next session: capture round-trip booking (2026-04-23)
 
-Everything above is one-way. The skill stops short of checkout, and it
+Everything above is one-way. The app stops short of checkout, and it
 only models a single `RegisterFlights` call for a single outbound
 segment. To book a round-trip we need to extend the flow.
 
@@ -1209,7 +1209,7 @@ Book the round-trip AUS↔SFO Joe picked originally:
 - **Outbound** Tue Apr 28 UA 1336, 1:00 PM → 3:02 PM AUS→SFO (known, $210 Basic)
 - **Return** Sun May 3, 5:10 PM → 10:55 PM SFO→AUS (nonstop, 3h 45m — UA flight number TBD; find via fresh search)
 
-End-to-end via the skill, **using CDP to drive the UI** only where the
+End-to-end via the app, **using CDP to drive the UI** only where the
 HTTP replay fails. Stop short of the final checkout POST (no payment).
 
 ### Start of session checklist
@@ -1220,7 +1220,7 @@ HTTP replay fails. Stop short of the final checkout POST (no payment).
    confirm login via `Network.getCookies` — `AuthCookie`, `User`, `SID`
    must all be present. If missing, ask Joe to log in. DO NOT try
    driving the flow while logged-out; everything 403s.
-3. `check_session` via the skill — should return `united:XX118941`.
+3. `check_session` via the app — should return `united:XX118941`.
 4. Read this file (requirements.md) tail. The Drive pattern that
    actually worked (2026-04-23) section is the known-good UI
    selectors.
@@ -1228,9 +1228,9 @@ HTTP replay fails. Stop short of the final checkout POST (no payment).
 ### Hypothesis A: two RegisterFlights calls with shared CartId
 
 Most airline booking APIs split the round-trip into two selection
-calls. Try this first — the skill change is small:
+calls. Try this first — the app change is small:
 
-1. `search_flights(origin=AUS, destination=SFO, depart_date=2026-04-28, return_date=2026-05-03)` — today the skill ignores `return_date`. Fix: fire one search for each slice. The search body's `Trips[]` takes one segment at a time anyway (we verified in the 2026-04-23 captures). For a round-trip session, fire search twice with `TripIndex: 1` for outbound and `TripIndex: 2` for return, sharing the `CartId` from the first search's `meta` event via `UsePassedCartId: true`.
+1. `search_flights(origin=AUS, destination=SFO, depart_date=2026-04-28, return_date=2026-05-03)` — today the app ignores `return_date`. Fix: fire one search for each slice. The search body's `Trips[]` takes one segment at a time anyway (we verified in the 2026-04-23 captures). For a round-trip session, fire search twice with `TripIndex: 1` for outbound and `TripIndex: 2` for return, sharing the `CartId` from the first search's `meta` event via `UsePassedCartId: true`.
 2. `select_flight(cart_id, booking_token=<outbound>, flight_hash=<outbound>)` — same as today, but on success don't advance to traveler page. Inspect the `DisplayCart.SearchType` field — it should be 2 for round-trip (we saw 1 for one-way).
 3. `select_flight(cart_id, booking_token=<return>, flight_hash=<return>, trip_index=2)` — NEW optional param. Probably maps to `TripIndex: 2` in the RegisterFlights body.
 4. After both slices registered, the cart should show TWO DisplayTrips with a combined GrandTotal. Then `register_traveler`, `get_seatmap` twice (once per slice), `register_seats` optionally per slice.
@@ -1264,7 +1264,7 @@ real frontend round-trip flow** with the same pattern used on 2026-04-23:
 - `register_traveler` is probably fine unchanged — the traveler is the same person for both legs.
 - `register_seats` needs to handle `OriginalSegmentIndex` / `LegIndex` for the return-slice seat.
 
-### Skill changes to anticipate
+### App changes to anticipate
 
 - `search_flights`: add `return_date` handling (fire two searches, merge offers).
 - `select_flight`: add `trip_index` param (default 1); handle two-call sequences with shared CartId.
@@ -1285,8 +1285,8 @@ before we see the actual cart data.
 
 The final `/api/ShoppingCart/checkout` or similar endpoint is
 **out of scope**. Capture it for reference but DO NOT call it. Joe
-will never put his card into this skill — if he wants to book for
-real he does it in the browser. The skill's value is everything
+will never put his card into this app — if he wants to book for
+real he does it in the browser. The app's value is everything
 up to the moment of charge.
 
 ### Free seats — quick win before round-trip
@@ -1528,7 +1528,7 @@ Three cards on Joe's account:
 - **9768** — MasterCard (custom name "AncestryPass Debit")
 
 Three opaque handles per card that thread into the checkout POST:
-`Key`, `AccountNumberToken`, `PersistentToken`. Skill stores all three
+`Key`, `AccountNumberToken`, `PersistentToken`. App stores all three
 in `payment_method.providerTokens`.
 
 ### Eligible forms of payment endpoint
@@ -1615,7 +1615,7 @@ Every DisplayTrips[].Flights[] entry has:
 - `OriginCountryCode`, `OriginStateCode`, `OrgTimezoneOffset`
 - Same for `Destination*` fields
 
-Skill now parses these into proper `aircraft` (with `manufacturer:
+App now parses these into proper `aircraft` (with `manufacturer:
 organization`) and `airport` (with city, countryCode, region) nodes.
 Manufacturer lookup table is IATA equipment code → organization node;
 only populated for codes actually observed to avoid fabricating data.
@@ -1635,7 +1635,7 @@ See the docstrings in `united.py` for the full contract.
 
 **HMAC key persistence**: the signing key lives at
 `~/.agentos/united-booking-key` (atomic write, 0o600 perms). First
-call mints it; subsequent calls reuse. `skill_secret.get/set` is
+call mints it; subsequent calls reuse. `app_secret.get/set` is
 attempted first but doesn't always persist across invocations, so
 the file is the authoritative store.
 
@@ -1673,7 +1673,7 @@ raises RuntimeError rather than guess.
    to re-authenticate. Either: (a) Joe logs in on Brave manually, then
    `store_session_cookies` refreshes credentials, or (b) write a
    proper `login(cdp_port=9222)` tool that opens a CDP-driven sign-in
-   flow. The skill has stubs that mention this but the tool isn't
+   flow. The app has stubs that mention this but the tool isn't
    actually implemented yet.
 2. **Capture the final checkout POST body shape.** The endpoint is
    suspected to be `/api/ShoppingCart/checkout` or similar. Options:
@@ -1686,7 +1686,7 @@ raises RuntimeError rather than guess.
    once body shape is known.
 4. **Seat selection**: Joe wants to be able to pick an aisle seat.
    `/book-flight/seatmap/<cartId>` URL and `register_seats` tool
-   already exist. Need a skill tool to go back to seatmap from
+   already exist. Need an app tool to go back to seatmap from
    checkout page (just nav + click logic).
 5. **`clear_cart`** — not yet captured. Click "Start Over" in UI with
    intercept running.
@@ -1694,7 +1694,7 @@ raises RuntimeError rather than guess.
    CalendarPricing prime + `sc=7,7` Referer + type-3 body, carts
    born via pure HTTP end up SearchType=1. Must CDP-drive the
    homepage form once to mint a SearchType=2 cart. Unsolved.
-7. **Skill performance**: every tool call mints a fresh bearer via
+7. **App performance**: every tool call mints a fresh bearer via
    `/api/auth/anonymous-token` and re-fetches profile. Cache both
    per-invocation (Joe flagged the 4s latency as annoying).
 
@@ -1842,7 +1842,7 @@ client-side countdown, not a server-side block.
   without firing the form's submit event (and thus no XHR).
 - React controlled inputs: set the value via the prototype's
   native setter, then dispatch `input` + `change` events. The
-  "type into field" pattern from other skills applies here.
+  "type into field" pattern from other apps applies here.
 - `#loginButton` is always in the DOM on any united.com page
   (header navbar). To open the sign-in drawer from any URL, click
   it rather than navigating to `/en/us/account/sign-in` (which is
@@ -1942,9 +1942,9 @@ extends `User.RememberID` TTL.
 
 ### Pure-Python implementation plan (login tools)
 
-Captured shapes are enough to build three skill tools, matching
-the canonical [`skills/adding-login.md` multi-step OTP
-pattern](../../../docs/src/content/docs/skills/adding-login.md):
+Captured shapes are enough to build three app tools, matching
+the canonical [`apps/adding-login.md` multi-step OTP
+pattern](../../../platform/docs/src/content/docs/apps/adding-login.md):
 
 ```python
 # 1) Produces credentials on a public connection.
@@ -1963,7 +1963,7 @@ async def login(*, method: str = "email", remember: bool = True,
     creds = await credentials.retrieve(
         domain="united.com", required=["email", "password"])
     if not creds.get("found"):
-        return skill_error("NeedsCredentials",
+        return app_error("NeedsCredentials",
                            required=["email", "password"])
     identifier = creds["value"]["email"]     # MP# or email
     password   = creds["value"]["password"]
@@ -1974,7 +1974,7 @@ async def login(*, method: str = "email", remember: bool = True,
         json={"userName": identifier},
         headers={"X-Authorization-api": f"bearer {await _anon_bearer()}"})
     if not v["data"]["isValid"]:
-        return skill_error("InvalidIdentifier",
+        return app_error("InvalidIdentifier",
                            hint=v["data"].get("errorCode"))
     encrypted_un = v["data"]["encryptedUserName"]
 
@@ -2023,10 +2023,10 @@ async def login(*, method: str = "email", remember: bool = True,
 async def verify_login_code(*, code: str, **params) -> dict:
     pending = await _pop_pending_login()
     if not pending:
-        return skill_error("NoPendingLogin",
+        return app_error("NoPendingLogin",
             "Call login first — no signin token on file.")
     if not re.fullmatch(r"\d{6}", code):
-        return skill_error("InvalidCode", "must be 6 digits")
+        return app_error("InvalidCode", "must be 6 digits")
 
     r = await http.post(
         "https://www.united.com/xapi/auth/validate-otp",
@@ -2039,7 +2039,7 @@ async def verify_login_code(*, code: str, **params) -> dict:
                  f"bearer {pending['signin_token']}"})
     if r.get("status") != 200:
         # 406 NotAcceptable = bad code; suggest regenerating.
-        return skill_error("WrongCode" if r.get("status") == 406
+        return app_error("WrongCode" if r.get("status") == 406
                            else "OtpFailed", response=r)
 
     # Set-Cookie headers on this response carry AuthCookie, User,
@@ -2057,13 +2057,13 @@ async def verify_login_code(*, code: str, **params) -> dict:
 
 Notes:
 - `_anon_bearer()` — United hands out an anonymous bearer to any
-  browser on page load. Reuse the helper already used by the skill
+  browser on page load. Reuse the helper already used by the app
   elsewhere (see `_ensure_bearer` in `united.py`).
 - `_stash_pending_login` / `_pop_pending_login` — keep a single
-  row in a skill-scoped table or reuse the HMAC-signed-blob
+  row in an app-scoped table or reuse the HMAC-signed-blob
   pattern we built for booking confirmation. 5-min TTL matches
   OTP expiry exactly.
-- Agents using the skill will usually chain
+- Agents using the app will usually chain
   `login(method="email") → gmail.search_emails → verify_login_code(code)`
   — we can also ship a convenience `login_and_verify()` that
   polls Gmail internally with the proven extraction pattern, for
@@ -2118,7 +2118,7 @@ End-to-end drive that restored the logged-in state:
 ```
 
 Zero bad OTP submits. Zero lockouts. Full XHR capture in
-`/tmp/ua_flow_capture.json`. The Python skill can replay steps
+`/tmp/ua_flow_capture.json`. The Python app can replay steps
 4,5,7,12 directly via `http.post` — no browser needed once
 `_anon_bearer` is obtained.
 
@@ -2191,7 +2191,7 @@ from arrival. Body includes a single 6-digit number.
 
 ```python
 r = await run({
-    "skill": "gmail",
+    "app": "gmail",
     "tool": "search_emails",
     "params": {
         "query": ("from:united.com "
@@ -2261,7 +2261,7 @@ The Brave tab was left parked on
   ~30 min old at first hit and still live. Upper bound unknown; this
   is the data point we have.
 
-### What this means for the skill
+### What this means for the app
 
 - **Don't mint a fresh cart just because the last action was a while
   ago.** A round-trip cart with no committed flights appears to live
@@ -2547,7 +2547,7 @@ rendered tax list from HTML** — the labels differ by locale.
 
 > **If it's shown on a United page, it's in `window.__UA_STORE__.getState()` or in the DOM's form elements. Walk the store first, fall back to DOM form values, never regex-scrape the rendered body.**
 
-Codify as much of this as possible in Python skill tools
+Codify as much of this as possible in Python app tools
 (`get_cart`, `get_contact_info`, future `get_checkout_state`) so
 agents don't have to rediscover these paths.
 
@@ -2628,7 +2628,7 @@ send("Fetch.enable", {"patterns": [
 
 ### Until the body is captured: confirm_booking stays read-only
 
-The skill's `confirm_booking` tool still refuses to contact the
+The app's `confirm_booking` tool still refuses to contact the
 checkout endpoint — the exact JSON body is required to avoid sending
 malformed money-moving requests. All other gates are real (HMAC blob,
 confirm-amount string match, live re-read, card-on-file verification,

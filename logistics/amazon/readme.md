@@ -24,8 +24,8 @@ Search products, get details, and access your Amazon account. No API keys — us
 > embedded in HTML between steps, plus TOTP on this account, so the
 > RE is more involved than ABP's Cognito single-handshake. Use
 > `agentos.browse.Session` (authoring-time CDP driver) + the
-> reverse-engineering skill at `skills/agents/reverse-engineering/`
-> when picking this up. See `docs/skills/adding-login.md` for the
+> reverse-engineering app at `apps/agents/reverse-engineering/`
+> when picking this up. See `docs/apps/adding-login.md` for the
 > recipe and `_roadmap/p1/plan.md § What's left` for the status.
 
 ## Features
@@ -78,44 +78,44 @@ Orders contain nested product entities. Each product is identified by ASIN and l
 
 ```bash
 # Autocomplete suggestions (public JSON API — most reliable)
-run({ skill: "amazon", tool: "search_suggestions",
+run({ app: "amazon", tool: "search_suggestions",
   params: { query: "wireless head" } })
 
 # Full product search
-run({ skill: "amazon", tool: "search_products",
+run({ app: "amazon", tool: "search_products",
   params: { query: "usb c cable", department: "electronics" } })
 
 # Product details by ASIN
-run({ skill: "amazon", tool: "get_product",
+run({ app: "amazon", tool: "get_product",
   params: { asin: "B0BQPNMXQV" } })
 
 # Check session / identify account
-run({ skill: "amazon", tool: "check_session" })
+run({ app: "amazon", tool: "check_session" })
 
 # List recent orders (default: last 30 days)
-run({ skill: "amazon", tool: "list_orders" })
+run({ app: "amazon", tool: "list_orders" })
 
 # List orders from past 3 months
-run({ skill: "amazon", tool: "list_orders",
+run({ app: "amazon", tool: "list_orders",
   params: { filter: "months-3" } })
 
 # List orders from a specific year (supports 2006-2026)
-run({ skill: "amazon", tool: "list_orders",
+run({ app: "amazon", tool: "list_orders",
   params: { filter: "year-2024" } })
 
 # Page 2 of results (10 per page)
-run({ skill: "amazon", tool: "list_orders",
+run({ app: "amazon", tool: "list_orders",
   params: { filter: "months-3", page: 2 } })
 
 # Get full order details (items, prices, shipping, tracking)
-run({ skill: "amazon", tool: "get_order",
+run({ app: "amazon", tool: "get_order",
   params: { order_id: "114-4501818-4961814" } })
 
 # Products recommended for repurchase
-run({ skill: "amazon", tool: "buy_again" })
+run({ app: "amazon", tool: "buy_again" })
 
 # Subscribe & Save subscriptions
-run({ skill: "amazon", tool: "subscriptions" })
+run({ app: "amazon", tool: "subscriptions" })
 ```
 
 ## Cookie Architecture
@@ -131,7 +131,7 @@ Amazon uses tiered cookie-based authentication:
 | `sst-main` (`Sst1\|...`) | SSO state token | Cross-service auth |
 | `sso-state-main` (`Xdsso\|...`) | SSO state persistence | Cross-service auth |
 
-The skill passes the cookie jar for `.amazon.com` with three cookies **excluded**: `csd-key`, `csm-hit`, and `aws-waf-token`. These trigger Amazon's Siege client-side decryption, rendering the HTML unparseable without JavaScript. All auth-tier tokens (`at-main`, `sess-at-main`, `sst-main`) are included.
+The app passes the cookie jar for `.amazon.com` with three cookies **excluded**: `csd-key`, `csm-hit`, and `aws-waf-token`. These trigger Amazon's Siege client-side decryption, rendering the HTML unparseable without JavaScript. All auth-tier tokens (`at-main`, `sess-at-main`, `sst-main`) are included.
 
 ## Technical Details
 
@@ -147,7 +147,7 @@ The skill passes the cookie jar for `.amazon.com` with three cookies **excluded*
 
 The order history page is **pure server-rendered HTML** — no hidden JSON or GraphQL API exists for orders. The page uses `.order-card` containers with `li.order-header__header-list-item` elements for date, total, ship-to, and order ID, plus `.yohtmlc-item` containers for product line items.
 
-**Siege encryption**: Amazon's `SiegeClientSideDecryption` encrypts order card contents when the `csd-key` cookie is present (signaling the client can decrypt via JS). The skill strips `csd-key`, `csm-hit`, and `aws-waf-token` from the cookie jar to force Amazon to serve plain, parseable HTML. Without this, the order cards are empty JS blobs.
+**Siege encryption**: Amazon's `SiegeClientSideDecryption` encrypts order card contents when the `csd-key` cookie is present (signaling the client can decrypt via JS). The app strips `csd-key`, `csm-hit`, and `aws-waf-token` from the cookie jar to force Amazon to serve plain, parseable HTML. Without this, the order cards are empty JS blobs.
 
 **Selectors**: Amazon uses `<span dir="ltr">` (not `<bdi dir="ltr">`) for order IDs, and `li.order-header__header-list-item` for header fields. The `data-component` attributes from the amazon-orders library are not present in the HTML served to httpx clients.
 

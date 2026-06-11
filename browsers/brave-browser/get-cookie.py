@@ -5,7 +5,7 @@ Brave is Chromium-based: same cookie encryption as Chrome, different Keychain en
 
 All I/O routes through the engine via SDK modules — no direct imports of
 subprocess, sqlite3, or cryptography. This is important because the Python
-sandbox blocks those imports. Every skill, including infrastructure skills
+sandbox blocks those imports. Every app, including infrastructure apps
 like cookie providers, must use SDK modules for I/O:
 
   keychain.read()   → secrets.read  → macOS Keychain

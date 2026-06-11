@@ -208,7 +208,7 @@ async def public_authenticate(*, page_url: str = "", **params) -> dict[str, Any]
 
     "Public" because the key is the one Goodreads embeds in their own browser
     bundle — same value every unauthenticated visitor receives. We never ship
-    it hardcoded; we re-read it fresh every time so the skill survives their
+    it hardcoded; we re-read it fresh every time so the app survives their
     next redeploy. Raises RuntimeError if discovery fails.
 
     Args:

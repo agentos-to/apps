@@ -6,7 +6,7 @@ name: macOS Keychain
 description: >
   Credential provider backed by the macOS login Keychain. Exposes
   internet-password entries matching a domain via
-  `@provides(login_credentials)` so skills' `login` tools can pull
+  `@provides(login_credentials)` so apps' `login` tools can pull
   `{email, password}` without pasting anything.
 color: "#D1D5DB"
 website: "https://support.apple.com/guide/keychain-access"
@@ -15,15 +15,15 @@ website: "https://support.apple.com/guide/keychain-access"
 # macOS Keychain
 
 Wraps `/usr/bin/security` to expose macOS Keychain internet-password
-entries as agentOS credentials. Read-only — this skill never writes to
+entries as agentOS credentials. Read-only — this app never writes to
 the Keychain.
 
 ## How matchmaking works
 
-When a skill's `login` tool calls
+When an app's `login` tool calls
 `credentials.retrieve(domain=".approach.app", required=["email", "password"])`,
-the engine walks every installed skill that declares
-`@provides(login_credentials)`. This skill's `get_credentials` tool
+the engine walks every installed app that declares
+`@provides(login_credentials)`. This app's `get_credentials` tool
 runs `security find-internet-password -s <host> -g` for each candidate
 host under the domain, picks a match, and returns `{email, password}`
 via the `__secrets__` envelope. The LLM never sees the raw password.
@@ -43,7 +43,7 @@ secret. That maps exactly onto the
 Generic-password entries (`security find-generic-password`) are
 deliberately excluded. They store things like API keys, encryption
 keys, and per-app secrets; lumping them in with login_credentials
-would give false positives to consumer skills asking for
+would give false positives to consumer apps asking for
 `{email, password}`.
 
 ## Access prompt

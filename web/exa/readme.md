@@ -39,7 +39,7 @@ Or use the automated bootstrap flow (see Auth below).
 Create a web search. Returns search results (index records, not full page content).
 
 ```
-run({ skill: "exa", tool: "search", params: { query: "rust programming" } })
+run({ app: "exa", tool: "search", params: { query: "rust programming" } })
 ```
 
 Results are `result` entities — snapshots of what the search engine knew about each URL.
@@ -50,7 +50,7 @@ To get full page content, follow up with `read_webpage` on a result's URL.
 Extract full content from a URL.
 
 ```
-run({ skill: "exa", tool: "read_webpage", params: { url: "https://example.com" } })
+run({ app: "exa", tool: "read_webpage", params: { url: "https://example.com" } })
 ```
 
 ## Auth
@@ -100,35 +100,35 @@ The login is agent-orchestrated. HTTPX triggers the email, but the code submissi
 
 ```
 # Step 1: trigger the verification code email (HTTPX)
-run({ skill: "exa", tool: "send_login_code", params: { email: "agentos@contini.co" } })
+run({ app: "exa", tool: "send_login_code", params: { email: "agentos@contini.co" } })
 # → { status: "code_sent", email, hint }
 
 # Step 2: agent checks email (any provider)
 # Look for subject "Sign in to Exa Dashboard", extract 6-digit code
 
 # Step 3: Playwright login (native form POST)
-run({ skill: "playwright", tool: "get_webpage", params: { url: "https://dashboard.exa.ai", wait_until: "domcontentloaded" } })
-run({ skill: "playwright", tool: "type", params: { selector: "input[type=email]", text: "agentos@contini.co" } })
-run({ skill: "playwright", tool: "click", params: { selector: "button[type=submit]" } })
+run({ app: "playwright", tool: "get_webpage", params: { url: "https://dashboard.exa.ai", wait_until: "domcontentloaded" } })
+run({ app: "playwright", tool: "type", params: { selector: "input[type=email]", text: "agentos@contini.co" } })
+run({ app: "playwright", tool: "click", params: { selector: "button[type=submit]" } })
 # Wait for code entry page...
-run({ skill: "playwright", tool: "type", params: { selector: "input[placeholder='Enter verification code']", text: "CODE" } })
-run({ skill: "playwright", tool: "click", params: { selector: "button[type=submit]" } })
+run({ app: "playwright", tool: "type", params: { selector: "input[placeholder='Enter verification code']", text: "CODE" } })
+run({ app: "playwright", tool: "click", params: { selector: "button[type=submit]" } })
 
 # Step 4: extract cookies from browser
-run({ skill: "playwright", tool: "cookies", params: { domain: ".exa.ai" } })
+run({ app: "playwright", tool: "cookies", params: { domain: ".exa.ai" } })
 # → find next-auth.session-token and cf_clearance
 
 # Step 5: store the session (HTTPX validates + stores via __secrets__)
-run({ skill: "exa", tool: "store_session_cookies", params: {
+run({ app: "exa", tool: "store_session_cookies", params: {
   email: "agentos@contini.co",
   session_token: "eyJhbG...",
   cf_clearance: "NIvx..."
 } })
 
 # Now dashboard operations work:
-run({ skill: "exa", tool: "get_api_keys" })
-run({ skill: "exa", tool: "get_teams" })
-run({ skill: "exa", tool: "create_api_key", params: { name: "my-key" } })
+run({ app: "exa", tool: "get_api_keys" })
+run({ app: "exa", tool: "get_teams" })
+run({ app: "exa", tool: "create_api_key", params: { name: "my-key" } })
 ```
 
 ### Playwright discovery notes

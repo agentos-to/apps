@@ -1,4 +1,4 @@
-"""Mimestream skill — local email via SQLite + keychain OAuth.
+"""Mimestream app — local email via SQLite + keychain OAuth.
 
 Reads Mimestream's Core Data store directly. All timestamps are adjusted
 by 978307200 seconds (Apple's Core Data epoch: 2001-01-01).

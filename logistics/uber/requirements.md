@@ -42,7 +42,7 @@ Cookie domain: `.ubereats.com` (separate connection from `.uber.com` rides — `
 **CRITICAL: Always use `http.headers(waf="cf", accept="json", extra={...})` for all requests.**
 The engine sets zero headers by default. Without browser-grade UA/sec-ch-* headers, some endpoints
 (notably `getReceiptByWorkflowUuidV1`) return 500. We are acting as Brave — send what Brave sends.
-See `docs/src/content/docs/skills.md` for `http.headers()` documentation.
+See `docs/src/content/docs/apps/overview.md` for `http.headers()` documentation.
 
 Required Eats-specific headers (pass via `extra=`):
 ```
@@ -196,7 +196,7 @@ Fare breakdown selectors (always populated):
 | `fare_line_item_amount_tip` | Tip | "$11.62" |
 | `fare_line_item_amount_delivery_discount` | Discount | "-$1.89" |
 
-Parse with lxml + cssselect (per skill standards — no BS4, no regex on HTML):
+Parse with lxml + cssselect (per app standards — no BS4, no regex on HTML):
 ```python
 from lxml import html as lhtml
 

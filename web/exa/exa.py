@@ -128,10 +128,10 @@ async def check_session(**params) -> dict:
     """Verify Exa dashboard session and identify the logged-in account.
 
     Cookies come from the ambient per-call jar seeded by the engine from
-    the connection's credential row — skill code never threads them.
+    the connection's credential row — app code never threads them.
 
     Returns the typed `account` shape per the check_session convention
-    in docs/src/content/docs/skills/auth-flows.md — identifier is the
+    in docs/src/content/docs/apps/auth-flows.md — identifier is the
     canonical email, userId is Exa's internal stable id.
     """
     session = await _check_session()

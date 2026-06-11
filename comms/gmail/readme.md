@@ -3,7 +3,7 @@ id: gmail
 services:
   - http
 name: Gmail
-description: "Full-featured Gmail — read, search, send, reply, forward, label, archive, draft, attachments, filters, and batch operations. Auth can use the shared `google` OAuth capability when a provider integration is available."
+description: "Full-featured Gmail — read, search, send, reply, forward, label, archive, draft, attachments, filters, and batch operations. Auth can use the shared `google` OAuth service when a provider integration is available."
 color: "#EA4335"
 website: "https://mail.google.com"
 privacy_url: "https://policies.google.com/privacy"
@@ -34,18 +34,18 @@ Do not pass `label_ids` as an array param — it causes a 400 error from the API
 
 ## Auth — Google OAuth via `provides: google`
 
-When some integration already holds Google OAuth tokens (often via macOS Keychain) and declares `provides: google` with a `credential_get` path, this skill can reuse those tokens — no separate Gmail API project for the user.
+When some integration already holds Google OAuth tokens (often via macOS Keychain) and declares `provides: google` with a `credential_get` path, this app can reuse those tokens — no separate Gmail API project for the user.
 
 How it works:
 1. A provider stores OAuth material in a system-specific way (Keychain entry shape depends on the app).
 2. The provider's `provides` / `credential_get` surface is matched by the runtime.
-3. This skill declares `connections.gmail.oauth.service: google`.
+3. This app declares `connections.gmail.oauth.service: google`.
 4. The resolver injects the configured auth headers on REST calls.
 5. If multiple providers satisfy `google`, the agent should ask the user which one to use.
 
 **Without a matching provider:** complete the standard OAuth flow at `GET /sys/oauth/authorize/gmail`.
 
-## Capabilities
+## Tools
 
 ```
 OPERATION             DESCRIPTION

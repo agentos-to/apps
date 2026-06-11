@@ -30,7 +30,7 @@ Search for flight offers using airport IATA codes and dates. Results are
 Search for flight offers between airports.
 
 ```
-run({ skill: "serpapi", tool: "search_offers", params: {
+run({ app: "serpapi", tool: "search_offers", params: {
   departure_id: "AUS",
   arrival_id: "JFK",
   outbound_date: "2026-04-15",
@@ -40,7 +40,7 @@ run({ skill: "serpapi", tool: "search_offers", params: {
 
 **One way:**
 ```
-run({ skill: "serpapi", tool: "search_offers", params: {
+run({ app: "serpapi", tool: "search_offers", params: {
   departure_id: "SFO",
   arrival_id: "LHR",
   outbound_date: "2026-05-01",
@@ -50,7 +50,7 @@ run({ skill: "serpapi", tool: "search_offers", params: {
 
 **With filters:**
 ```
-run({ skill: "serpapi", tool: "search_offers", params: {
+run({ app: "serpapi", tool: "search_offers", params: {
   departure_id: "LAX",
   arrival_id: "NRT",
   outbound_date: "2026-06-01",
@@ -67,7 +67,7 @@ run({ skill: "serpapi", tool: "search_offers", params: {
 Get recommended/best offers (Google's picks). May not always be available.
 
 ```
-run({ skill: "serpapi", tool: "list_offers", params: {
+run({ app: "serpapi", tool: "list_offers", params: {
   departure_id: "AUS",
   arrival_id: "LHR",
   outbound_date: "2026-04-15",
@@ -80,7 +80,7 @@ run({ skill: "serpapi", tool: "list_offers", params: {
 Get return flight offers after selecting an outbound (round trip flow).
 
 ```
-run({ skill: "serpapi", tool: "get_offer", params: {
+run({ app: "serpapi", tool: "get_offer", params: {
   departure_token: "W1siUEVLIi..."
 }})
 ```
@@ -90,7 +90,7 @@ run({ skill: "serpapi", tool: "get_offer", params: {
 Get booking links and prices for a selected itinerary.
 
 ```
-run({ skill: "serpapi", tool: "get_booking_options", params: {
+run({ app: "serpapi", tool: "get_booking_options", params: {
   booking_token: "WyJDalJJ..."
 }})
 ```
@@ -100,7 +100,7 @@ run({ skill: "serpapi", tool: "get_booking_options", params: {
 Check if prices are high or low for a route.
 
 ```
-run({ skill: "serpapi", tool: "get_price_insights", params: {
+run({ app: "serpapi", tool: "get_price_insights", params: {
   departure_id: "AUS",
   arrival_id: "JFK",
   outbound_date: "2026-04-15",

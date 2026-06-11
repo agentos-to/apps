@@ -12,13 +12,13 @@ product:
   developer: Amazon
 ---
 
-# Goodreads Skill
+# Goodreads
 
 Read your Goodreads profile, books, reviews, friends, and activity without needing an official API key.
 
 ## Setup
 
-Goodreads discontinued their public API in 2020. This skill uses **session-based authentication** through your browser cookies.
+Goodreads discontinued their public API in 2020. This app uses **session-based authentication** through your browser cookies.
 
 ### Quick Start
 
@@ -67,40 +67,40 @@ All operations return data mapped to standard AgentOS entities:
 
 ```bash
 # Get your profile
-run({ skill: "goodreads", tool: "get_profile", params: { user_id: "<your-goodreads-user-id>" } })
+run({ app: "goodreads", tool: "get_profile", params: { user_id: "<your-goodreads-user-id>" } })
 
 # List books you're currently reading
-run({ skill: "goodreads", tool: "list_books", 
+run({ app: "goodreads", tool: "list_books", 
   params: { user_id: "<your-goodreads-user-id>", shelf: "currently-reading", sort: "date_added" } })
 
 # Search for a book
-run({ skill: "goodreads", tool: "search_books", 
+run({ app: "goodreads", tool: "search_books", 
   params: { query: "Outliers Malcolm Gladwell", limit: 5 } })
 
 # Get book details
-run({ skill: "goodreads", tool: "get_book", params: { book_id: "3828382" } })
+run({ app: "goodreads", tool: "get_book", params: { book_id: "3828382" } })
 
 # List public reviews
-run({ skill: "goodreads", tool: "list_book_reviews",
+run({ app: "goodreads", tool: "list_book_reviews",
   params: { book_id: "4934", limit: 5 } })
 
 # List similar books
-run({ skill: "goodreads", tool: "list_similar_books",
+run({ app: "goodreads", tool: "list_similar_books",
   params: { book_id: "4934", limit: 5 } })
 
 # View your reviews
-run({ skill: "goodreads", tool: "list_reviews", 
+run({ app: "goodreads", tool: "list_reviews", 
   params: { user_id: "<your-goodreads-user-id>", sort: "date" } })
 
 # Find users
-run({ skill: "goodreads", tool: "search_people", 
+run({ app: "goodreads", tool: "search_people", 
   params: { query: "Malcolm Gladwell", limit: 5 } })
 
 # List your custom shelves
-run({ skill: "goodreads", tool: "list_shelves", params: { user_id: "<your-goodreads-user-id>" } })
+run({ app: "goodreads", tool: "list_shelves", params: { user_id: "<your-goodreads-user-id>" } })
 
 # Get books on a specific shelf
-run({ skill: "goodreads", tool: "list_shelf_books",
+run({ app: "goodreads", tool: "list_shelf_books",
   params: { user_id: "<your-goodreads-user-id>", shelf_name: "philosophy" } })
 ```
 
@@ -108,7 +108,7 @@ run({ skill: "goodreads", tool: "list_shelf_books",
 
 ### Authentication
 
-The skill uses **Goodreads session cookies** from your browser for authenticated operations:
+The app uses **Goodreads session cookies** from your browser for authenticated operations:
 
 - `session_id` - Session token
 - `__Secure-user_session` - Secure session token
@@ -147,16 +147,16 @@ This means the best public-first strategy is:
 
 The AppSync endpoint and API key are **discovered at runtime**, not hardcoded. The discovery chain is:
 
-1. **Graph Cache** — sandbox storage on the skill's graph node (instant, persisted across restarts)
+1. **Graph Cache** — sandbox storage on the app's graph node (instant, persisted across restarts)
 2. **JS Bundle** — extract Prod config from the Next.js `_app` chunk (~1-2s, no browser needed)
 3. **Browser Capture** — stealth Playwright watches AppSync network traffic (~15-20s fallback)
 4. **Hardcoded Fallback** — known-good values as last resort
 
-This means the skill self-heals when Goodreads rotates keys or redeploys.
+This means the app self-heals when Goodreads rotates keys or redeploys.
 
-## Scope Vision: Feature Parity with Reddit Skill
+## Scope Vision: Feature Parity with the Reddit App
 
-This skill is built to reach feature parity with the Reddit skill:
+This app is built to reach feature parity with the Reddit app:
 
 ### Current Implementation
 - Read user profiles and social connections (friends, followers)

@@ -8,7 +8,7 @@ Authentication: the portal is a CloudFront-fronted static SPA that
 authenticates against AWS Cognito via `USER_PASSWORD_AUTH`. The `login`
 tool resolves `{email, password}` from a credential provider
 (`credentials.retrieve(".approach.app", required=["email","password"])`
-— 1Password or any other `@provides(login_credentials)` skill),
+— 1Password or any other `@provides(login_credentials)` app),
 runs the Cognito handshake, and persists the resulting `{email,
 password, idToken, refreshToken}` in the credential store via
 `__secrets__`. Authed tools read the IdToken off `params.auth`
@@ -76,8 +76,8 @@ _config_cache: dict | None = None
 async def _discover_config(force: bool = False) -> dict:
     """Extract widgetsApiKey + Cognito pool/client from the portal bundle.
 
-    Same values every visitor sees; we re-read at runtime so the skill
-    survives Tilefive redeploys without shipping a new skill version.
+    Same values every visitor sees; we re-read at runtime so the app
+    survives Tilefive redeploys without shipping a new app version.
     """
     global _config_cache
     if _config_cache and not force:
@@ -162,8 +162,8 @@ def _id_token_from_params(params: dict) -> str:
     if not token:
         raise RuntimeError(
             "No IdToken available — run the `login` tool first "
-            "(agentos call run '{\"skill\":\"austin-boulder-project\","
-            "\"tool\":\"login\"}')."
+            "(agentos call apps '{\"op\":\"run\",\"params\":{\"app\":"
+            "\"austin-boulder-project\",\"tool\":\"login\"}}')."
         )
     return token
 
@@ -283,7 +283,7 @@ def _booking_to_entity(b: dict) -> dict:
     activity_name = activities[0].get("name", "") if activities else ""
     # Tilefive widget response uses `customerCount` (currently reserved)
     # and `event.maxCustomers` (capacity). There is no `ticketsRemaining`
-    # field — an earlier version of this skill read it and silently got
+    # field — an earlier version of this app read it and silently got
     # `None`, causing every class to render as "full capacity available".
     taken = b.get("customerCount")
     capacity = event.get("maxCustomers") or b.get("maxNumOfGuests")
@@ -330,7 +330,7 @@ async def get_locations(**params) -> list[dict]:
     """List all Bouldering Project locations as place entities.
 
     Austin has two — Springdale (id=6) and Westgate (id=5). Shape-
-    typed so "what gyms are there?" works cross-skill.
+    typed so "what gyms are there?" works cross-app.
     """
     cfg = await _discover_config()
     resp = await client.get(f"{WIDGETS_API}/locations", headers=_widgets_headers(cfg["widgetsApiKey"]))
@@ -400,7 +400,7 @@ async def book_class(
     """Book a class for the authenticated user.
 
     The booking is billed against a specific membership. If the caller
-    doesn't pass `membership_id`, the skill looks up the user's first
+    doesn't pass `membership_id`, the app looks up the user's first
     active membership. Explicit override supported for multi-membership
     users.
     """
@@ -553,7 +553,7 @@ async def get_my_memberships(include_expired: bool = False, **params) -> list[di
 
     Emitted memberships link to both the `account` (ABP login) and
     the `location` (gym branch) so "what memberships do I have?" and
-    "which gym?" work cross-skill on the graph.
+    "which gym?" work cross-app on the graph.
 
     Args:
         include_expired: when false (default), filter to `status=="active"`
@@ -643,12 +643,12 @@ async def login(*, email: str = "", password: str = "", **params) -> dict[str, A
     Credential resolution order:
       1. Caller passed `email` + `password` explicitly.
       2. `credentials.retrieve(".approach.app", required=["email","password"])`
-         matchmakes an installed `@provides(login_credentials)` skill
+         matchmakes an installed `@provides(login_credentials)` app
          (1Password, Keychain, etc.).
       3. Nothing matched → structured `NeedsCredentials` error; agent
          surfaces "add it to your password manager, or pass it directly."
 
-    On success, the skill runs the Cognito USER_PASSWORD_AUTH handshake
+    On success, the app runs the Cognito USER_PASSWORD_AUTH handshake
     and persists `{email, password, idToken, refreshToken}` via the
     `__secrets__` envelope under `(.approach.app, email)`. Authed tools
     read the IdToken from `params.auth.idToken` on subsequent calls.
@@ -718,7 +718,7 @@ async def logout(**params) -> dict[str, Any]:
     Cognito; the access token's ~1h natural TTL is the only
     remaining validity window. The refresh token is dead immediately.
 
-    The engine runs the cleanup tail (delete skill-written credential
+    The engine runs the cleanup tail (delete app-written credential
     rows, invalidate cache) after this returns, so we don't touch
     `__secrets__` here. Provider rows (1Password) stay put — logout
     forgets the session, not the password.

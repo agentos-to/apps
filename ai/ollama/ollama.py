@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ollama skill for AgentOS — local AI model management and inference.
+"""Ollama app for AgentOS — local AI model management and inference.
 
 Connections:
   api  — Ollama REST API at http://localhost:11434

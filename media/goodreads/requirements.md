@@ -1,6 +1,6 @@
 # Goodreads Reverse-Engineering Requirements
 
-This document captures the current reverse-engineering findings for Goodreads' modern web stack and data surfaces. It is a handoff artifact for future work in this skill folder.
+This document captures the current reverse-engineering findings for Goodreads' modern web stack and data surfaces. It is a handoff artifact for future work in this app folder.
 
 ## Current Architecture
 
@@ -79,7 +79,7 @@ Current request shape:
 - body: `{"query":"...","variables":{...}}`
 - header: `x-api-key: <public key>`
 
-This is implemented in `skills/goodreads/public_graph.py`.
+This is implemented in `apps/media/goodreads/public_graph.py`.
 
 ## What The Public API Key Means
 
@@ -114,7 +114,7 @@ This shows that Goodreads uses field-level authorization inside AppSync rather t
 
 Logged-in Goodreads access is cookie-based on the web side.
 
-Cookies already referenced by the skill:
+Cookies already referenced by the app:
 
 - `session_id`
 - `__Secure-user_session`
@@ -266,7 +266,7 @@ The AppSync endpoint and API key are **not hardcoded as the primary path**. Inst
 
 ### Tier 1: Cache (instant)
 
-Sandbox storage on the skill's graph node stores the last discovered config. Subsequent calls read from the graph cache — no file I/O, persists across restarts.
+Sandbox storage on the app's graph node stores the last discovered config. Subsequent calls read from the graph cache — no file I/O, persists across restarts.
 
 ### Tier 2: JS Bundle Extraction (~1-2 seconds)
 
@@ -293,17 +293,17 @@ If all discovery fails, known-good values are used. These are labeled `hardcoded
 
 ### Why This Architecture
 
-The stable concept is: Goodreads exposes AppSync config to the browser. The unstable details are the exact hostname and API key. This discovery chain means the skill self-heals when Goodreads rotates keys or changes endpoints, without requiring code changes.
+The stable concept is: Goodreads exposes AppSync config to the browser. The unstable details are the exact hostname and API key. This discovery chain means the app self-heals when Goodreads rotates keys or changes endpoints, without requiring code changes.
 
 ## Known Files In This Folder
 
 Primary implementation:
 
-- `skills/goodreads/public_graph.py` — all public data operations and runtime discovery
+- `apps/media/goodreads/public_graph.py` — all public data operations and runtime discovery
 
-Primary skill definition:
+Primary app definition:
 
-- `skills/goodreads/readme.md`
+- `apps/media/goodreads/readme.md`
 
 ## Current Direct HTTP Behavior
 

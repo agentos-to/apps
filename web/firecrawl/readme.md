@@ -43,7 +43,7 @@ Read a URL with browser rendering and return a `webpage` entity.
 
 ```js
 run({
-  skill: "firecrawl",
+  app: "firecrawl",
   tool: "read_webpage",
   params: { url: "https://react.dev/", wait_for_js: 1000 }
 })

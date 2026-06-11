@@ -1,11 +1,11 @@
-# AgentOS Skills
+# AgentOS Apps
 
-Skills — Python adapters that connect AgentOS to third-party services
+Apps — Python adapters that connect AgentOS to third-party platforms
 (GitHub, Google, iMessage, Brave, etc.) and expose agent-only tools
-(LLM, web search, file system). Written against the Python **Skills
+(LLM, web search, file system). Written against the Python **App
 SDK** at [`platform/sdk/python/`](../platform/sdk/python).
 
-[agentos.to](https://agentos.to) · [agentos.to/skills](https://agentos.to/skills/)
+[agentos.to](https://agentos.to) · [agentos.to/apps](https://agentos.to/apps/)
 
 ## What is AgentOS?
 
@@ -14,11 +14,11 @@ first. The engine speaks MCP so any MCP-capable agent (Claude Code,
 Cursor, etc.) can use AgentOS as its tool surface. Your data stays on
 your machine.
 
-Skills are how capabilities arrive. A skill declares what it
+Apps are how services arrive. An app declares what it
 **provides** — `@provides(llm)`, `@provides(web_search)`,
 `@provides(file_system)` — and the engine matchmakes requests to the
-best available provider. Callers ask for a capability, not a specific
-skill.
+best available provider. Callers ask for a service, not a specific
+app.
 
 ## What's here
 
@@ -35,30 +35,30 @@ web/            Browsers, search, scraping
 ```
 
 Each top-level category is flat so the repo doubles as a browse-able
-catalog — clone and you immediately see every skill.
+catalog — clone and you immediately see every app.
 
 ## Getting started
 
 ```bash
-git clone https://github.com/agentos-to/skills
+git clone https://github.com/agentos-to/apps
 git clone https://github.com/agentos-to/site platform   # contract + SDKs + docs
-cd skills
+cd apps
 pip install -e ../platform/sdk/python         # ships the validator
-git config core.hooksPath ../bin/git-hooks    # pre-commit + code review
+git config core.hooksPath bin/git-hooks       # pre-commit + code review
 ```
 
 Useful commands:
 
 ```bash
-agent-sdk validate                  # lint every skill in this repo
-agent-sdk validate exa              # single skill
+agent-sdk validate                  # lint every app in this repo
+agent-sdk validate exa              # single app
 agent-sdk validate --sandbox        # only the banned-import sandbox check
-agent-sdk new-skill my-skill        # scaffold a new skill
+agent-sdk new-app my-app            # scaffold a new app
 agent-sdk shapes                    # list available shapes
 ```
 
 Full authoring guide at
-[agentos.to/skills](https://agentos.to/skills/).
+[agentos.to/apps](https://agentos.to/apps/).
 
 ## Sibling repos
 
@@ -66,13 +66,12 @@ Full authoring guide at
 | ---------------------------------------------------------- | ------------ | ---- |
 | [`core`](https://github.com/agentos-to/core)               | Rust         | The engine, CLI, MCP server |
 | [`platform`](https://github.com/agentos-to/site)           | Py·TS·Astro  | The contract — ontology, codegen, the Python + TypeScript SDKs, docs site → [agentos.to](https://agentos.to) |
-| **`skills`** (this repo)                                   | Python       | Skills — adapters for third-party services |
-| [`apps`](https://github.com/agentos-to/apps)               | TypeScript   | Apps + React components |
+| **`apps`** (this repo)                                     | Python       | Apps — adapters for third-party platforms |
 
 ## Contributing
 
-Anyone can contribute. Found a bug? Want a new skill?
-[Open an issue](https://github.com/agentos-to/skills/issues) or a PR.
+Anyone can contribute. Found a bug? Want a new app?
+[Open an issue](https://github.com/agentos-to/apps/issues) or a PR.
 
 ## License
 

@@ -1,4 +1,4 @@
-"""Brave Browser skill — browsing history, profiles, cookies, and cookie key derivation.
+"""Brave Browser app — browsing history, profiles, cookies, and cookie key derivation.
 
 Replaces YAML SQL, command, and steps operations with Python using the agentOS SDK.
 Cookie decryption (cookie_get) lives in get-cookie.py and is untouched.

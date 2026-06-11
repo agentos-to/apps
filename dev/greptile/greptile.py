@@ -296,7 +296,7 @@ async def check_session(*, auth: dict = None, **params) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Member management — the primary surface of this skill. All routes go through
+# Member management — the primary surface of this app. All routes go through
 # /api/trpc on the dashboard host. Procedures captured from bundle spelunking;
 # see the readme "People / Org API" table.
 # ---------------------------------------------------------------------------
@@ -664,7 +664,7 @@ async def grep_bundle(*, path: str, patterns: list = None, context: int = 60,
     """Fetch a (usually large) URL with session cookies and return regex matches.
 
     Designed for Next.js chunk spelunking: the raw body would be too large to round
-    trip through the CLI renderer, so the skill runs the regexes itself and returns
+    trip through the CLI renderer, so the app runs the regexes itself and returns
     only the hits. Default patterns look for API URLs, fetch() calls, and
     server-action markers.
 

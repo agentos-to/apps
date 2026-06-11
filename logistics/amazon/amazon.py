@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amazon skill — search, products, order history, and account identity.
+Amazon app — search, products, order history, and account identity.
 
 Uses Amazon's public completion.amazon.com API for keyword suggestions
 and lxml HTML parsing for account pages. Order history and account
@@ -1448,7 +1448,7 @@ async def check_session(**params) -> dict[str, Any]:
     Identity is keyed on the account email scraped from `/ax/account/manage`
     (Login & Security). When Amazon gates that page behind a single-factor
     step-up challenge, we return `authenticated: false` — that triggers the
-    engine's auto-relogin path, which dispatches the skill's `login` tool
+    engine's auto-relogin path, which dispatches the app's `login` tool
     to complete the step-up. Until that `login` tool ships, the call
     surfaces as an auth failure instead of silently producing a non-email
     identifier.

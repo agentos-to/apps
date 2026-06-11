@@ -1,5 +1,5 @@
 """
-United Airlines skill — profile, MileagePlus balances, reservations,
+United Airlines app — profile, MileagePlus balances, reservations,
 flight search, and travel history.
 
 Auth mechanics (see requirements.md for the full story):
@@ -14,7 +14,7 @@ Auth mechanics (see requirements.md for the full story):
 Cookie sourcing:
 The default path reads cookies from the brave-browser provider (Brave's
 on-disk SQLite). That's often stale relative to what Brave has in memory
-— Brave flushes cookies lazily. To sidestep, this skill provides:
+— Brave flushes cookies lazily. To sidestep, this app provides:
 
 - `store_session_cookies(cookies=<dict>)` — manual: caller passes the
   fresh cookie values (maybe grabbed via CDP or the user's browser
@@ -385,7 +385,7 @@ async def store_session_cookies(*, cookies: dict, **params) -> dict:
 
     This is the recommended path when Brave's on-disk cookie DB is stale
     relative to its in-memory state — the user is logged in in Brave, but
-    the skill keeps reading an older snapshot. The agent grabs fresh
+    the app keeps reading an older snapshot. The agent grabs fresh
     cookies via CDP (or pastes them from browser devtools) and hands them
     to us.
 
@@ -1005,7 +1005,7 @@ async def get_cart(*, cart_id: str, **params) -> dict:
     output: status=`hold`, total + currency, `trips[]` with `legs[]`.
     The raw cart blob (carrying SearchType, SelectedProducts, traveler
     state, seats, bundles, etc.) is attached as `_raw` for callers that
-    want to probe fields the skill doesn't yet surface.
+    want to probe fields the app doesn't yet surface.
 
     Args:
         cart_id: UUID from search or select_flight output.
@@ -1491,7 +1491,7 @@ async def search_flights(
 #      → returns the full cabin layout with pricing + availability.
 #   4. (TBD) register_seats, apply_offers, checkout
 #
-# The skill stops short of checkout — we never submit payment.
+# The app stops short of checkout — we never submit payment.
 
 
 def _bbx_cell_id(booking_token: str, fare_family: str | None = None) -> str:
@@ -2779,7 +2779,7 @@ def _booking_hmac_key() -> bytes:
     doesn't persist across calls (observed 2026-04-23), falls back to a
     file in ~/.agentos/united-booking-key. Both paths produce the same
     value for the life of the key file — so prepare_booking and
-    confirm_booking across separate skill invocations verify against the
+    confirm_booking across separate app invocations verify against the
     same signature.
     """
     import os, secrets, pathlib
@@ -3440,12 +3440,12 @@ async def confirm_booking(
     dry_run: bool = True,
     **params,
 ) -> dict:
-    """Charge the card and book the flight — the only tool in the skill
+    """Charge the card and book the flight — the only tool in the app
     that moves money.
 
     ALL of the following must succeed or this tool refuses:
 
-    1. Blob signature verifies (HMAC-SHA256 with the skill's secret key).
+    1. Blob signature verifies (HMAC-SHA256 with the app's secret key).
     2. Blob hasn't expired (5-minute TTL from prepare_booking).
     3. `confirm_amount` is an EXACT string match to the blob's total,
        formatted as "USD 464.36" (or equivalent currency). No substring
@@ -3537,7 +3537,7 @@ async def confirm_booking(
             f"confirm_booking: payment_method_last4={payment_method_last4} "
             f"does not match any card on file (saw: {last4_on_file or 'none'}). "
             f"Refusing to charge. To add a card, the user must do it in the "
-            f"United website — this skill does not store new cards."
+            f"United website — this app does not store new cards."
         )
 
     # 5. Consents — session-4 blob (v3+) carries save_card_for_inflight and
@@ -3579,7 +3579,7 @@ async def confirm_booking(
     # payment-submission body is the wrong kind of brave.
     raise RuntimeError(
         "confirm_booking: all gates passed but the /api/ShoppingCart/checkout "
-        "endpoint body shape has not been reverse-engineered yet. The skill "
+        "endpoint body shape has not been reverse-engineered yet. The app "
         "refuses to guess the body for a payment call. Next: capture a real "
         "checkout POST from the SPA (click Agree and purchase with Network "
         "intercept running) to learn the body shape, then wire it here."

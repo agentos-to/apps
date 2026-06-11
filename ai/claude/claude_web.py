@@ -5,7 +5,7 @@ claude_web.py — claude.ai private API client (web connection of ai/claude)
 Session cookies ride via the ``web`` connection's ambient Jar (seeded
 from a logged-in browser's ``sessionKey`` cookie). The connection is
 ``client="fetch"`` so XHR-style Sec-Fetch-* and Sec-CH-UA* come for
-free; the skill adds only the claude.ai-specific ``anthropic-client-
+free; the app adds only the claude.ai-specific ``anthropic-client-
 version`` header and forces HTTP/1.1 (Cloudflare blocks HTTP/2).
 """
 
@@ -16,7 +16,7 @@ from agentos import claims, client, connection, provides, returns, test, timeout
 
 BASE_URL = "https://claude.ai"
 
-# Skill-specific headers merged on top of the fetch-bundle the connection
+# App-specific headers merged on top of the fetch-bundle the connection
 # supplies. Brave's UA identity (v="146") since that's the browser with
 # the cookies.
 _CLAUDE_HEADERS = {

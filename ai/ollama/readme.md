@@ -30,7 +30,7 @@ ollama pull qwen3.5:9b-q8_0    # recommended: 11GB, tools + vision + thinking, 2
 ollama pull glm-4.7-flash       # coding specialist: 19GB, best local SWE-bench
 ```
 
-The skill auto-starts the Ollama server if it is not running — no manual setup required.
+The app auto-starts the Ollama server if it is not running — no manual setup required.
 
 ## Connections
 
@@ -60,7 +60,7 @@ The skill auto-starts the Ollama server if it is not running — no manual setup
 { id, name, input }
 ```
 
-Pass tools as `{ name, description, input_schema }` — the same format used by the Anthropic skill.
+Pass tools as `{ name, description, input_schema }` — the same format used by the Claude app.
 
 ## Thinking mode
 

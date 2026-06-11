@@ -34,7 +34,7 @@ Privacy-focused web search powered by Brave's independent index.
 Create a web search. Returns search results (index records).
 
 ```
-run({ skill: "brave", tool: "search", params: { query: "rust programming" } })
+run({ app: "brave", tool: "search", params: { query: "rust programming" } })
 ```
 
 ### Search Operators

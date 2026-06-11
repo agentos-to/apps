@@ -29,21 +29,21 @@ Manage domains and DNS records in a Porkbun account.
 ## Limitations
 
 - Porkbun does not support domain registration through this API
-- This skill is for managing existing domains and DNS only
+- This app is for managing existing domains and DNS only
 
 ## Example Calls
 
 ```js
-run({ skill: "porkbun", tool: "list_domains" })
+run({ app: "porkbun", tool: "list_domains" })
 
 run({
-  skill: "porkbun",
+  app: "porkbun",
   tool: "list_dns_records",
   params: { domain: "example.com" }
 })
 
 run({
-  skill: "porkbun",
+  app: "porkbun",
   tool: "create_dns_record",
   params: {
     domain: "example.com",

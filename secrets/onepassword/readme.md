@@ -6,7 +6,7 @@ name: 1Password
 description: >
   Credential provider backed by the 1Password CLI (`op`). Exposes
   Login and API-Credential vault items via
-  `@provides(login_credentials)` and `@provides(api_key)` so skills'
+  `@provides(login_credentials)` and `@provides(api_key)` so apps'
   `login` tools can pull `{email, password}` or API keys without the
   user pasting anything.
 color: "#0572EC"
@@ -17,7 +17,7 @@ website: "https://1password.com/"
 
 Wraps the [1Password CLI](https://developer.1password.com/docs/cli/)
 (`op`) to expose vault items as agentOS credential sources. Read-only
-in P1 — this skill never writes to vaults. A future project covers the
+in P1 — this app never writes to vaults. A future project covers the
 full vault-import scope (credit cards, bank accounts, identity docs as
 graph entities with tokenization).
 
@@ -37,9 +37,9 @@ cached session lifetime.
 
 ## Matchmaking
 
-When a skill's `login` tool calls
+When an app's `login` tool calls
 `credentials.retrieve(domain=".approach.app", required=["email", "password"])`,
-the engine dispatches this skill's `get_credentials` tool with the
+the engine dispatches this app's `get_credentials` tool with the
 domain. The tool runs `op item list --categories Login --format json`,
 filters by the item's `urls[]` matching the domain, and returns the
 first hit via `__secrets__`.
@@ -71,5 +71,5 @@ more than one item matches.
 - Writes (create / update / delete items).
 - Full vault import with credit cards, bank accounts, identity docs as
   graph entities. See
-  [`_specs/skills/1password-integration.md`](../../../_specs/skills/1password-integration.md)
+  [`core/_roadmap/_specs/skills/1password-integration.md`](../../../core/_roadmap/_specs/skills/1password-integration.md)
   for that scope.

@@ -9,7 +9,7 @@
 The live adapter (`whatsapp.py`) runs entirely on **WhatsApp Web** in
 the engine-owned Brave instance — reads, sends, reactions, read
 receipts, durable live watch, and decrypted media hydration, all via
-the `browser_session` capability. The macOS desktop app and its
+the `browser_session` service. The macOS desktop app and its
 `ChatStorage.sqlite` are NOT used and need not be installed.
 
 What Web cannot reach is *deep history*: WhatsApp Web only syncs

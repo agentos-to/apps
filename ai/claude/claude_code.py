@@ -124,8 +124,8 @@ async def list_models_cli(**params) -> list:
     No API key required — this works on Pro/Max/Team subscriptions.
 
     Named `list_models_cli` (not `list_models`) because `claude_api.py`
-    already defines `list_models` and skill tool names share a flat
-    namespace across all .py files in the skill directory.
+    already defines `list_models` and app tool names share a flat
+    namespace across all .py files in the app directory.
 
     The /v1/models endpoint does not consume inference quota.
     """
@@ -676,7 +676,7 @@ async def list_conversations_cli(*, project: str | None = None, limit: int = 0, 
     """List Claude Code conversations (local transcripts under ~/.claude/projects/).
 
     Named `list_conversations_cli` because `claude_web.py` owns `list_conversations`
-    (for claude.ai web chats) and skill tool names share a flat namespace.
+    (for claude.ai web chats) and app tool names share a flat namespace.
 
     Each conversation is one JSONL transcript file. Returns a flat list of
     `conversation`-shape dicts — id (the transcript UUID), name (ai-title or
@@ -731,7 +731,7 @@ async def read_conversation_cli(*, id: str, project: str | None = None, **params
     """Read a full Claude Code conversation transcript.
 
     Named `read_conversation_cli` because `claude_web.py` owns `get_conversation`
-    (for claude.ai web chats) and skill tool names share a flat namespace.
+    (for claude.ai web chats) and app tool names share a flat namespace.
 
     Returns one `conversation`-shape dict with a nested `message[]` relation.
     Each message has the shape-native fields (id, author, content, published,

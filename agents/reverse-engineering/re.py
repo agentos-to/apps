@@ -1,17 +1,17 @@
 """Reverse-engineering toolkit — Python tools an agent calls when
 reverse-engineering a live web service.
 
-The skill is agent-facing utility: no auth, no provider contract, no
+The app is agent-facing utility: no auth, no provider contract, no
 graph shape return. It reaches into arbitrary user-supplied URLs
-(unlike most skills, which are per-service), so the `public`
+(unlike most apps, which are per-platform), so the `public`
 connection below is connection-scaffolding only — `client.get(...)`
 accepts absolute URLs and the engine handles the dispatch.
 
-Phase 1 of the RE-skill roadmap project: skeleton + one placeholder
-tool to prove the skill-authoring path works end-to-end. Phases 2–5
+Phase 1 of the RE-app roadmap project: skeleton + one placeholder
+tool to prove the app-authoring path works end-to-end. Phases 2–5
 add `capture`, `replay`, `find_bundles`, `hook_fetch`,
 `dump_storage`, `eval`, and the rich `inspect_page` body. See
-`_roadmap/p2/browser-stack/reverse-engineering-skill.md`.
+`core/_roadmap/p2/browser-stack/reverse-engineering-skill.md`.
 """
 
 import re as _re
@@ -24,7 +24,7 @@ from agentos import (
 )
 
 
-# The RE skill navigates to arbitrary user-supplied URLs — every tool
+# The RE app navigates to arbitrary user-supplied URLs — every tool
 # takes its own absolute `url`, so there's no sensible `base_url` to
 # bake in. The connection exists to satisfy the SDK's "tools need a
 # connection" contract; client.get(absolute_url) bypasses base_url.

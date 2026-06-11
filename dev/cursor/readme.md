@@ -33,7 +33,7 @@ You are running in Cursor.
 - MCP config: `~/.cursor/mcp.json` (user-level; applies to all projects)
 - To reload MCP config: `cp ~/.cursor/mcp.json ~/.cursor/mcp.json.nudge && sleep 0.5 && mv ~/.cursor/mcp.json.nudge ~/.cursor/mcp.json` — triggers hot reload without restarting Cursor. Use `cp` not `mv` so the original is never missing if interrupted.
 - If any tools are disconnected, reload MCP config using the command above, then retry.
-- To install or remove the agentOS MCP entry: use `run({ skill: "cursor", tool: "install_mcp" })` / `uninstall_mcp`.
+- To install or remove the agentOS MCP entry: use `run({ app: "cursor", tool: "install_mcp" })` / `uninstall_mcp`.
 
 ## Recommended settings
 
@@ -57,13 +57,13 @@ The `install_mcp` and `uninstall_mcp` operations manage the agentOS MCP entry in
 
 ```js
 // Install (auto-detects binary path)
-run({ skill: "cursor", tool: "install_mcp" })
+run({ app: "cursor", tool: "install_mcp" })
 
 // Install with explicit path
-run({ skill: "cursor", tool: "install_mcp", params: { binary_path: "/Users/you/dev/agentos/target/release/agentos" } })
+run({ app: "cursor", tool: "install_mcp", params: { binary_path: "/Users/you/dev/agentos/target/release/agentos" } })
 
 // Remove
-run({ skill: "cursor", tool: "uninstall_mcp" })
+run({ app: "cursor", tool: "uninstall_mcp" })
 ```
 
 **Binary path auto-detection** (in order):
@@ -92,10 +92,10 @@ Cursor sessions become `session` entities on the graph with `client: "cursor"`, 
 
 ```
 # One-time: import full history (all workspaces, ~7 seconds)
-run({ skill: "cursor", tool: "backfill_session" })
+run({ app: "cursor", tool: "backfill_session" })
 
 # Or import just one workspace
-run({ skill: "cursor", tool: "backfill_session", params: { workspace: "~/dev/myproject" } })
+run({ app: "cursor", tool: "backfill_session", params: { workspace: "~/dev/myproject" } })
 
 # Ongoing: session.list runs automatically via entity fan-out when anyone calls
 list({ type: "session" })
@@ -106,7 +106,7 @@ After import, all sessions are FTS5-searchable:
 search({ query: "Langfuse pipeline", types: ["session"] })
 ```
 
-**Stats:** Run `python3 cursor.py --stats` to see how many sessions are available across both sources and all workspaces before importing. (The old `list-conversations.py` still exists for standalone use but skill operations now use `cursor.py`.)
+**Stats:** Run `python3 cursor.py --stats` to see how many sessions are available across both sources and all workspaces before importing. (The old `list-conversations.py` still exists for standalone use but app operations now use `cursor.py`.)
 
 **Deduplication:** Sessions are deduplicated by UUID (remote_id). Safe to run backfill multiple times — existing sessions won't be duplicated.
 
@@ -218,11 +218,11 @@ urls_fetched:
 
 ### Research extraction
 
-The `pull_document` skill operation and the standalone `extract-research.py` script both scan Cursor's database for research-quality sub-agent outputs.
+The `pull_document` app operation and the standalone `extract-research.py` script both scan Cursor's database for research-quality sub-agent outputs.
 
-**Via skill (imports into graph):**
+**Via app (imports into graph):**
 ```js
-run({ skill: "cursor", tool: "pull_document" })
+run({ app: "cursor", tool: "pull_document" })
 ```
 
 **Standalone script (saves to `.research/` directory):**

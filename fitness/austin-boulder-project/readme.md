@@ -23,11 +23,11 @@ this order:
 
 1. **Caller-supplied** — `run login '{"email":"...", "password":"..."}'`.
 2. **Credential providers** — an installed `@provides(login_credentials)`
-   skill matched on `.approach.app` (1Password, macOS Keychain, etc.).
+   app matched on `.approach.app` (1Password, macOS Keychain, etc.).
 3. **`NeedsCredentials`** — structured error when neither path resolves,
    telling the agent what domain and fields it needs.
 
-On success, the skill runs AWS Cognito `USER_PASSWORD_AUTH` and stashes
+On success, the app runs AWS Cognito `USER_PASSWORD_AUTH` and stashes
 `{email, password, idToken, refreshToken}` in the credential store.
 Authed tools (`book_class`, `get_my_memberships`, etc.) read the IdToken
 automatically from `params.auth` on subsequent calls.
@@ -51,10 +51,10 @@ automatically from `params.auth` on subsequent calls.
 
 ```js
 // Next 3 days of classes at Springdale (default)
-run({ skill: "austin-boulder-project", tool: "get_schedule" })
+run({ app: "austin-boulder-project", tool: "get_schedule" })
 
 // One specific day, yoga only, at Westgate
-run({ skill: "austin-boulder-project", tool: "get_schedule", params: {
+run({ app: "austin-boulder-project", tool: "get_schedule", params: {
   date: "2026-03-18",
   days: 1,
   location_id: 5,
@@ -62,7 +62,7 @@ run({ skill: "austin-boulder-project", tool: "get_schedule", params: {
 }})
 
 // Book a class (use id from get_schedule)
-run({ skill: "austin-boulder-project", tool: "book_class", params: {
+run({ app: "austin-boulder-project", tool: "book_class", params: {
   booking_instance_id: 826115
 }})
 ```

@@ -29,16 +29,16 @@ Manage domains and DNS records in a Gandi account.
 ## Example Calls
 
 ```js
-run({ skill: "gandi", tool: "list_domains" })
+run({ app: "gandi", tool: "list_domains" })
 
 run({
-  skill: "gandi",
+  app: "gandi",
   tool: "list_dns_records",
   params: { domain: "example.com" }
 })
 
 run({
-  skill: "gandi",
+  app: "gandi",
   tool: "upsert_dns_record",
   params: {
     domain: "example.com",
@@ -50,7 +50,7 @@ run({
 })
 
 run({
-  skill: "gandi",
+  app: "gandi",
   tool: "delete_dns_record",
   params: {
     domain: "example.com",

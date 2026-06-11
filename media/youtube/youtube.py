@@ -116,7 +116,7 @@ def _ydl(extra: dict | None = None) -> yt_dlp.YoutubeDL:
 # Operations
 # ─────────────────────────────────────────────────────────────────────────────
 
-@test.skip(reason="yt-dlp pulls in socket at import time — blocked by skill sandbox")
+@test.skip(reason="yt-dlp pulls in socket at import time — blocked by app sandbox")
 @returns("video[]")
 async def search_videos(query: str, limit: int = 50, **params) -> list[dict]:
     """Search YouTube videos by query (returns results sorted by relevance)

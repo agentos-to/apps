@@ -1,4 +1,4 @@
-"""Facebook skill — public group metadata via HTTP scraping."""
+"""Facebook app — public group metadata via HTTP scraping."""
 
 import re
 import shutil

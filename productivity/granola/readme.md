@@ -25,7 +25,7 @@ If you see auth errors, open the Granola app to refresh the token.
 
 ## Connections (API + cache)
 
-The skill declares two **connections** — `api` (live REST) and `cache` (local `cache-v6.json`). For operations that support both, pick one with `params.connection`: `"api"` or `"cache"`. The default is `api` (first in the list).
+The app declares two **connections** — `api` (live REST) and `cache` (local `cache-v6.json`). For operations that support both, pick one with `params.connection`: `"api"` or `"cache"`. The default is `api` (first in the list).
 
 | Connection | When | Use case |
 |------------|------|----------|
@@ -52,22 +52,16 @@ Attendees are stored in `data.attendees` on the meeting entity. Full person enti
 
 ### `list_meetings` — Browse recent meetings
 
-```bash
-curl -X POST http://localhost:3456/api/skills/granola/meeting.list \
-  -H "X-Agent: cursor" \
-  -H "Content-Type: application/json" \
-  -d '{"limit": 10}'
+```
+run({ app: "granola", tool: "list_meetings", params: { limit: 10 } })
 ```
 
 Returns meetings with title, times, location, attendees. No transcript data — use `get_meeting` for that.
 
 ### `get_meeting` — Full meeting with transcript
 
-```bash
-curl -X POST http://localhost:3456/api/skills/granola/meeting.get \
-  -H "X-Agent: cursor" \
-  -H "Content-Type: application/json" \
-  -d '{"id": "2fbc5ac2-..."}'
+```
+run({ app: "granola", tool: "get_meeting", params: { id: "2fbc5ac2-..." } })
 ```
 
 Returns the full meeting including:
@@ -104,29 +98,23 @@ Each thread is a **`conversation` entity** — the same entity kind used elsewhe
 Via AgentOS MCP:
 
 ```
-run({ skill: "granola", tool: "list_meetings", params: { limit: 10 } })
-run({ skill: "granola", tool: "list_conversations", params: { document_id: "<id from step 1>" } })
-run({ skill: "granola", tool: "get_conversation", params: { thread_id: "<id from step 2>" } })
+run({ app: "granola", tool: "list_meetings", params: { limit: 10 } })
+run({ app: "granola", tool: "list_conversations", params: { document_id: "<id from step 1>" } })
+run({ app: "granola", tool: "get_conversation", params: { thread_id: "<id from step 2>" } })
 ```
 
 ### `list_conversations` — Q&A threads for a meeting
 
-```bash
-curl -X POST http://localhost:3456/api/skills/granola/conversation.list \
-  -H "X-Agent: cursor" \
-  -H "Content-Type: application/json" \
-  -d '{"document_id": "6dc09094-1c7e-421d-86c1-2b23f924b34e"}'
+```
+run({ app: "granola", tool: "list_conversations", params: { document_id: "6dc09094-1c7e-421d-86c1-2b23f924b34e" } })
 ```
 
 Returns threads linked to that meeting (e.g. "Validator Agent and Auto Rewrite Loop"). Use `get_conversation` with a thread ID to read the full exchange.
 
 ### `get_conversation` — Full Q&A thread
 
-```bash
-curl -X POST http://localhost:3456/api/skills/granola/conversation.get \
-  -H "X-Agent: cursor" \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id": "5c4516ae-1224-4e39-a642-a1b9b7e0e279"}'
+```
+run({ app: "granola", tool: "get_conversation", params: { thread_id: "5c4516ae-1224-4e39-a642-a1b9b7e0e279" } })
 ```
 
 Returns the thread with all user/assistant messages in order.

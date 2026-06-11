@@ -31,19 +31,19 @@ that's already on your machine.
 
 ```bash
 # List recent commits
-git_commit.list (skill: git, path: "~/dev/myproject")
+git_commit.list (app: git, path: "~/dev/myproject")
 
 # Search commit messages
-git_commit.search (skill: git, path: "~/dev/myproject", query: "readme")
+git_commit.search (app: git, path: "~/dev/myproject", query: "readme")
 
 # Get a specific commit
-git_commit.get (skill: git, path: "~/dev/myproject", id: "f9f9f57")
+git_commit.get (app: git, path: "~/dev/myproject", id: "f9f9f57")
 
 # List branches
-branch.list (skill: git, path: "~/dev/myproject")
+branch.list (app: git, path: "~/dev/myproject")
 
 # Get repo info
-repository.get (skill: git, path: "~/dev/myproject")
+repository.get (app: git, path: "~/dev/myproject")
 
 # Live status (not stored — computed fresh)
 git.status (path: "~/dev/myproject")

@@ -2,16 +2,16 @@
 
 Implements the `cdp_access` service: *"give me a CDP WebSocket URL
 to a debug-attachable Brave browser."* Tiny surface — one tool,
-`cdp_connect`. The caller (typically the `browser-control` skill's
+`cdp_connect`. The caller (typically the `browser-control` app's
 `browser_session` provider) opens its own WebSocket from the returned
 URL and drives CDP from there. This module knows Brave-specific
 things (profile paths, DevToolsActivePort, launch flags, debug port);
 it knows nothing about what callers do with the session.
 
-Architecture: see `_roadmap/p2/browser-control-skill.md`. Three
-layers — RE / scraping / MFA skills consume `browser_session`;
+Architecture: see `core/_roadmap/p2/browser-control-skill.md`. Three
+layers — RE / scraping / MFA apps consume `browser_session`;
 `browser-control` provides `browser_session` and consumes
-`cdp_access`; this module provides `cdp_access`. Zero cross-skill
+`cdp_access`; this module provides `cdp_access`. Zero cross-app
 imports; engine matchmakes every boundary.
 
 Two modes. **attach**: Brave must already be running with
@@ -21,7 +21,7 @@ command. **launch**: spawn (or reuse) an engine-owned Brave
 instance with its own profile at `~/.agentos/browsers/brave` —
 a dedicated, always-on session host that doesn't share fate with
 the user's daily browser. `open -na` detaches via LaunchServices,
-so the instance survives the skill call.
+so the instance survives the app call.
 """
 
 import asyncio

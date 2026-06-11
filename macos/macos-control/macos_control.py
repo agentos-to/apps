@@ -1083,10 +1083,10 @@ async def get_file_info(*, path, **_kwargs):
 
 
 # ── Volume transport ──────────────────────────────────────────────────
-# The fixed three-verb interface the engine dispatches when this skill
+# The fixed three-verb interface the engine dispatches when this app
 # serves a filesystem volume: `list_volumes` ANNOUNCES (boot + refresh;
 # entries upsert as volume nodes under My Computer), `list_contents` and
-# `read_node` SERVE a browse, reached by name on the announcing skill.
+# `read_node` SERVE a browse, reached by name on the announcing app.
 # Node id == absolute path for the filesystem transport. Read-only by
 # construction — the write verbs don't exist. Contract:
 # core/_roadmap/p2/realms-transports/plan.md "The transport contract".

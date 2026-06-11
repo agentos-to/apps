@@ -1,4 +1,4 @@
-# Amazon Skill — Requirements & Research
+# Amazon App — Requirements & Research
 
 ## Goal
 
@@ -9,7 +9,7 @@ Search Amazon products and view order history. No official API keys. No paid ser
 - No Amazon Product Advertising API (PA-API) — requires approval, has quotas
 - No paid proxy/scraping services
 - Small-scale personal use only (1-2 req/sec max)
-- Session cookies already available via the skill's cookie provider
+- Session cookies already available via the app's cookie provider
 
 ---
 

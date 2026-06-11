@@ -28,7 +28,7 @@ Read accounts, transactions, and balance history from [Copilot Money](https://co
 | Transactions | `CopilotDB.sqlite` → `Transactions` table |
 | Balance history | `CopilotDB.sqlite` → `accountDailyBalance` table |
 
-## Capabilities
+## Tools
 
 ```
 OPERATION              ENTITY TYPE    DESCRIPTION
@@ -40,6 +40,6 @@ transaction.search     transaction    Search by merchant, category, or notes
 
 ## Notes
 
-- This skill is **read-only**
+- This app is **read-only**
 - Data reflects what Copilot has synced from Plaid — real-time balances may lag slightly
 - Accounts are tagged `financial` on the graph and linked to institution organizations

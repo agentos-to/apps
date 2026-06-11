@@ -1,11 +1,11 @@
 ---
 name: goodreads
-type: skill-todo
+type: app-todo
 ---
 
 # goodreads/ — TODO + compaction-survival notes
 
-Living doc. If you're an agent picking this skill up after compaction,
+Living doc. If you're an agent picking this app up after compaction,
 **read this first**. It captures what the previous session learned so
 you don't have to relearn it.
 
@@ -57,7 +57,7 @@ read the shelf from the page's hydration state / GraphQL the way
 - **connections-as-http-clients** — move `waf/mode/accept` off call
   sites into a `client:` profile on the connection. Deletes the
   conditional in `_fetch_url`.
-- **python-first-skill-surface** — umbrella: readme becomes prose only,
+- **python-first-app-surface** — umbrella: readme becomes prose only,
   all declarative surface moves to Python decorators.
 - **unified-quality-runner** — merge `quality run` + `run_tests.py` into
   one command, one JSONL row.
@@ -75,14 +75,14 @@ note, not a near-term TODO.
 
 ### Engine dispatch is verbatim
 
-The Rust engine parses skill `.py` files as text
-(`core/crates/core/src/skills/python_ast.rs`). A tool's **name is
+The Rust engine parses app `.py` files as text
+(`core/crates/core/src/apps/python_ast.rs`). A tool's **name is
 the Python function name exactly** — no prefix stripping, no
 mangling, no magic. If your function is `async def get_book(...)` and
 you call with `tool: "getBook"`, it fails with `Tool 'getBook' not
 found. Available: get_book, ...`.
 
-Corollary: **`run_` prefixes are noise.** The skill name is already
+Corollary: **`run_` prefixes are noise.** The app name is already
 the namespace. Name your functions `get_book`, not `run_get_book`.
 
 ### Only `@returns`-decorated functions become tools
@@ -100,7 +100,7 @@ Every helper in your call chain that eventually touches `http` must
 be `async def`. Calling a coroutine without `await` returns a
 coroutine object; the first `.get("ok")` on it raises
 `AttributeError: 'coroutine' object has no attribute 'get'`. That
-exact pattern is how this skill was broken for weeks.
+exact pattern is how this app was broken for weeks.
 
 **`time.sleep(x)` inside an `async def` is a real bug** — blocks the
 event loop. Use `await asyncio.sleep(x)`. `agent-sdk validate`
@@ -108,9 +108,9 @@ catches this.
 
 ### Two accounts = "Multiple accounts. Specify account."
 
-If a skill has more than one logged-in account, the engine refuses to
+If an app has more than one logged-in account, the engine refuses to
 pick one. Every call must include `account: "<name>"`. When testing
-today, pick by looking at `agentos call accounts '{"skill":"<id>"}'`.
+today, pick by looking at `agentos call apps '{"op":"accounts"}'`.
 
 ### No parallel testing convention
 
@@ -126,7 +126,7 @@ becomes Python-AST — but it stays a single surface.
 - **Full-path the engine binary**:
   `/Users/joe/dev/agentos/core/target/debug/agentos`. The `agentos`
   on PATH may be a stale build.
-- **Skill code edits don't need a rebuild.** Python + readme
+- **App code edits don't need a rebuild.** Python + readme
   frontmatter are re-read on every dispatch. Only Rust changes
   require `./dev.sh build` + `./dev.sh restart`.
 - **Delete legacy on sight.** No `# deprecated` breadcrumbs, no
@@ -136,16 +136,16 @@ becomes Python-AST — but it stays a single surface.
 
 ### Shape-native return dicts
 
-Skills return dicts whose keys match a shape in `docs/shapes/*.yaml`.
+Apps return dicts whose keys match a shape in `docs/shapes/*.yaml`.
 `agent-sdk validate` AST-checks the returns against the declared
 shape. Don't invent keys; pick an existing shape
-(`docs/src/content/docs/shapes.md`). 95% of what a skill needs is
+(`docs/src/content/docs/shapes/overview.md`). 95% of what an app needs is
 already shaped.
 
 ### The AppSync-key extractor is self-healing
 
 The public Goodreads GraphQL backend rotates its `da2-…` key on each
-redeploy. This skill reads the key fresh from Goodreads' own
+redeploy. This app reads the key fresh from Goodreads' own
 `_app-<hash>.js` bundle on every call — see `_discover_from_bundle`.
 If the regexes (`APP_BUNDLE_RE`, `APPSYNC_ENDPOINT_RE`) ever stop
 matching, don't hardcode a fallback — fix the extractor. That's the
@@ -157,12 +157,12 @@ contract.
 # engine up?
 /Users/joe/dev/agentos/core/target/debug/agentos call --list | head
 
-# validate
-skills/agent-sdk validate skills/media/goodreads
+# validate (from the apps/ root)
+agent-sdk validate media/goodreads
 
 # one tool
-/Users/joe/dev/agentos/core/target/debug/agentos call run \
-  '{"skill":"goodreads","tool":"get_book","params":{"book_id":"4934"}}'
+/Users/joe/dev/agentos/core/target/debug/agentos call apps \
+  '{"op":"run","params":{"app":"goodreads","tool":"get_book","params":{"book_id":"4934"}}}'
 
 # sweep
 cd _quality && bin/quality run

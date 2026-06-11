@@ -18,11 +18,11 @@ tools:
 
 Render travel itineraries from the graph.
 
-> **Provider-agnostic.** This skill reads the shared `reservation` shape
+> **Provider-agnostic.** This app reads the shared `reservation` shape
 > (see `docs/shapes/reservation.yaml`). It does not know or care which
-> provider skill wrote the reservation — United, Delta, Amtrak, Airbnb,
+> provider app wrote the reservation — United, Delta, Amtrak, Airbnb,
 > OpenTable, etc. all emit the same shape; the same renderer works for
-> all of them. If you're adding a new provider skill, your job stops
+> all of them. If you're adding a new provider app, your job stops
 > at writing a graph-complete reservation; the rendering lives here.
 
 ## Tools

@@ -15,5 +15,5 @@ CANONICAL_HOOK="$WORKSPACE/bin/git-hooks/pre-commit"
 if [ -x "$CANONICAL_HOOK" ]; then
     "$CANONICAL_HOOK"
 else
-    echo "⚠️  canonical hook not found at $CANONICAL_HOOK — skipping skill validation + review"
+    echo "⚠️  canonical hook not found at $CANONICAL_HOOK — skipping app validation + review"
 fi

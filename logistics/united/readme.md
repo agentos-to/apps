@@ -40,8 +40,8 @@ test:
 
 Flight search, booking, reservations, boarding passes, and MileagePlus account access via united.com session cookies.
 
-> **Before extending this skill**, read:
-> 1. [Reverse Engineering overview](../../../docs/src/content/docs/skills/reverse-engineering/overview.md)
+> **Before extending this app**, read:
+> 1. [Reverse Engineering overview](../../../platform/docs/src/content/docs/apps/reverse-engineering/overview.md)
 > 2. [requirements.md](./requirements.md) — captured API shapes, endpoint inventory, auth details
 > 3. The `reservation`, `flight`, `airline`, `airport`, and `pass` shape YAMLs under `docs/shapes/`
 
@@ -97,18 +97,21 @@ cleanest display across terminals, chat UIs, and LLM echo-back paths,
 call it with `view.format=text`:
 
 ```bash
-agentos call run '{
-  "skill": "united",
-  "tool": "render_seatmap",
+agentos call apps '{
+  "op": "run",
   "params": {
-    "cart_id": "...",
-    "flight_number": 1336,
-    "origin": "AUS", "destination": "SFO",
-    "departure_datetime": "2026-04-28T13:00",
-    "arrival_datetime":   "2026-04-28T15:02",
-    "fare_basis_code":    "LAA0AQBN"
-  },
-  "view": { "format": "text" }
+    "app": "united",
+    "tool": "render_seatmap",
+    "params": {
+      "cart_id": "...",
+      "flight_number": 1336,
+      "origin": "AUS", "destination": "SFO",
+      "departure_datetime": "2026-04-28T13:00",
+      "arrival_datetime":   "2026-04-28T15:02",
+      "fare_basis_code":    "LAA0AQBN"
+    },
+    "view": { "format": "text" }
+  }
 }'
 ```
 
@@ -126,20 +129,20 @@ Two paths:
 Log in to [united.com](https://www.united.com) in Brave. The engine's
 `brave-browser` provider extracts cookies from Brave's encrypted SQLite
 DB. **Caveat:** Brave buffers cookie writes to disk and only flushes
-periodically — immediately after a fresh login, the skill may see stale
+periodically — immediately after a fresh login, the app may see stale
 cookies for up to ~5 minutes until Brave flushes. If `check_session`
 returns SESSION_EXPIRED while you're clearly logged in in Brave, either
 wait ~5 min or fully quit (Cmd+Q) and reopen Brave to force a flush.
 
 ### 2. `store_session_cookies` (bypasses Brave's stale DB)
 
-For when you want the skill to use cookies independent of Brave's disk
+For when you want the app to use cookies independent of Brave's disk
 state — e.g. you just logged in and don't want to wait. The agent grabs
 live cookies (from CDP, the browser devtools Network tab, or any other
 source) and passes them in:
 
 ```js
-run({ skill: "united", tool: "store_session_cookies", params: {
+run({ app: "united", tool: "store_session_cookies", params: {
   cookies: {
     AuthCookie: "…", Session: "…", User: "…",
     "PIM-SESSION-ID": "…", _ucid: "…", "1pc_session": "…",
@@ -148,7 +151,7 @@ run({ skill: "united", tool: "store_session_cookies", params: {
 }});
 ```
 
-The skill validates these against `/xapi/myunited/User/profile` (so we
+The app validates these against `/xapi/myunited/User/profile` (so we
 know the cookies represent a real logged-in session, not an anonymous
 visit) and persists them to the engine's credential store via
 `__secrets__`. Because the engine resolves cookies by newest-timestamp

@@ -17,13 +17,13 @@ product:
 
 # Greptile
 
-AI code review and codebase search. This skill manages **organization membership** via the dashboard session — listing members, sending invites, generating invite links, updating roles, and removing members.
+AI code review and codebase search. This app manages **organization membership** via the dashboard session — listing members, sending invites, generating invite links, updating roles, and removing members.
 
 ## Setup
 
 1. Log into https://app.greptile.com in Brave.
 2. The engine auto-resolves cookies from Brave for `app.greptile.com`.
-3. `run({skill:"greptile", tool:"check_session"})` should return `{authenticated: true, ...}`.
+3. `run({app:"greptile", tool:"check_session"})` should return `{authenticated: true, ...}`.
 
 ## Auth architecture
 
@@ -62,11 +62,11 @@ All procedures take `tenantExternalId` from the session's `currentTenantExternal
 
 **Invite link format:** `https://app.greptile.com/invitation?token=<token>` — assembled in the "Copy Invite Link" button's onClick: `` `${appUrl}/invitation?token=${token}` ``.
 
-**Roles:** `ADMIN` or `MEMBER` (enum `n.X` in the bundle). Accepted case-insensitively by the skill.
+**Roles:** `ADMIN` or `MEMBER` (enum `n.X` in the bundle). Accepted case-insensitively by the app.
 
-**Namespace vs. organization:** the bundle also uses `namespace.*` procedures (`namespace.removeMember`, `namespace.updateMemberRole`, `namespace.addMember`) for **per-repo** access control. This skill intentionally only wires the org-level procedures — remove from the org, not from a namespace.
+**Namespace vs. organization:** the bundle also uses `namespace.*` procedures (`namespace.removeMember`, `namespace.updateMemberRole`, `namespace.addMember`) for **per-repo** access control. This app intentionally only wires the org-level procedures — remove from the org, not from a namespace.
 
-There is also a separate backend at `https://api.greptile.com` (Express, Bearer JWT from `greptileToken` in the session). Not used by this skill — member management lives entirely on the dashboard's tRPC route.
+There is also a separate backend at `https://api.greptile.com` (Express, Bearer JWT from `greptileToken` in the session). Not used by this app — member management lives entirely on the dashboard's tRPC route.
 
 ## Tools
 
@@ -79,4 +79,4 @@ There is also a separate backend at `https://api.greptile.com` (Express, Bearer 
 - `revoke_invite` — revoke a single pending email invite.
 - `update_role` — change a member's role (ADMIN / MEMBER).
 - `remove_member` — remove a member from the org.
-- `probe`, `backend_probe`, `grep_bundle`, `grep_page_chunks`, `inspect_auth` — reverse-engineering helpers. Leave in place while the API is still being mapped; don't ship them in a "stable" skill.
+- `probe`, `backend_probe`, `grep_bundle`, `grep_page_chunks`, `inspect_auth` — reverse-engineering helpers. Leave in place while the API is still being mapped; don't ship them in a "stable" app.

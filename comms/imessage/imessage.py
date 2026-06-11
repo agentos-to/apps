@@ -1,4 +1,4 @@
-"""iMessage skill — read and send iMessages/SMS via macOS Messages SQLite DB.
+"""iMessage app — read and send iMessages/SMS via macOS Messages SQLite DB.
 
 Reads ~/Library/Messages/chat.db directly. Timestamps are converted from
 Apple's Core Data epoch (nanoseconds since 2001-01-01) to ISO datetime.

@@ -22,7 +22,7 @@ here.now hosts static files (HTML, CSS, JS, images, PDFs, videos) on Cloudflare'
 https://bright-canvas-a7k2.here.now/
 ```
 
-Three-step flow (handled automatically by the skill):
+Three-step flow (handled automatically by the app):
 1. **Create** — declare files and get presigned upload URLs
 2. **Upload** — PUT content to Cloudflare directly
 3. **Finalize** — make it live
@@ -68,8 +68,8 @@ Response:
 
 ### List your sites (authenticated)
 
-```bash
-curl http://localhost:3456/mem/websites?refresh=true&skill=here-now
+```
+run({ app: "here-now", tool: "list_websites" })
 ```
 
 ### Claim an anonymous publish
@@ -101,4 +101,4 @@ Change `filename` and `content_type`:
 
 1. Sign in at [here.now](https://here.now)
 2. Copy your API key from the dashboard
-3. Add it to AgentOS credentials for the `here-now` skill
+3. Add it to AgentOS credentials for the `here-now` app

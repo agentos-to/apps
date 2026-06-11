@@ -1,4 +1,4 @@
-"""Git skill — Python implementation replacing command: operations."""
+"""Git app — Python implementation replacing command: operations."""
 
 import json
 import re

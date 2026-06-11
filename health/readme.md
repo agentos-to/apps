@@ -1,6 +1,6 @@
 ---
 id: health
-capabilities:
+services:
   - http
 name: Health Records
 description: Parses on-disk lab reports into the health graph
@@ -33,11 +33,11 @@ instead of duplicating.
 |---|---|---|
 | Superpower panel CSV | header `Name,Category,Value,Unit,Range` | ✅ |
 
-This skill ingests **text files only** — it has no PDF support and does
+This app ingests **text files only** — it has no PDF support and does
 not shell out. PDF lab reports (Quest, LabCorp, One Medical, older
-panels) wait on a future PDF→text *capability* skill the engine can
-route to; only then does a `*-pdf` format get added here. Until that
-exists, a PDF draw is a one-time import done outside the skill.
+panels) wait on a future app providing a PDF→text *service* the engine
+can route to; only then does a `*-pdf` format get added here. Until that
+exists, a PDF draw is a one-time import done outside the app.
 
 `loinc_search` resolves a biomarker to its LOINC code against the
 public `tx.fhir.org` terminology server — live, no auth, nothing
@@ -45,12 +45,12 @@ hardcoded. There is no reliable *mechanical* name→code search (the
 everyday code drowns under hundreds of hits), so the split is: the
 **agent** translates the report's wording into LOINC axis terms
 ("Total Cholesterol" → component `Cholesterol`, specimen `Ser/Plas`),
-and the **skill** runs the precise six-axis query. The chosen
+and the **app** runs the precise six-axis query. The chosen
 `loincCode` is then stamped on the biomarker node — each user's graph
 accumulates their own resolved biomarkers; nothing personal lives in
-the skill.
+the app.
 
-**Scope.** This skill parses *structure* and runs *precise lookups* —
+**Scope.** This app parses *structure* and runs *precise lookups* —
 it holds no biomarker knowledge and makes no clinical judgement.
 Translating wording to LOINC terms, and picking among unit variants,
 is the agent's job. Interpretive work (condition vs procedure, SNOMED)

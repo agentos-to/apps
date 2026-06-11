@@ -18,7 +18,7 @@ import re
 from agentos import client, returns, app_error
 
 # tx.fhir.org — HL7's public FHIR terminology server, LOINC loaded, no
-# auth. Reached directly; `capabilities: [http]` in the readme grants it.
+# auth. Reached directly; `services: [http]` in the readme grants it.
 LOINC_EXPAND = "https://tx.fhir.org/r4/ValueSet/$expand"
 
 

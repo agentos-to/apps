@@ -1,4 +1,4 @@
-"""Gmail skill — all operations implemented via client.get()/client.post()/etc.
+"""Gmail app — all operations implemented via client.get()/client.post()/etc.
 
 All public functions take **params. Auth token lives in
 params["auth"]["access_token"], injected by the engine from OAuth resolution.

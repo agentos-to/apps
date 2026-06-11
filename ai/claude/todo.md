@@ -1,6 +1,6 @@
-# Claude skill — outstanding work
+# Claude app — outstanding work
 
-Living TODO list for the consolidated `ai/claude` skill. Crossed off as shipped.
+Living TODO list for the consolidated `ai/claude` app. Crossed off as shipped.
 
 ## Migration status (this pass)
 
@@ -12,8 +12,8 @@ Living TODO list for the consolidated `ai/claude` skill. Crossed off as shipped.
 - [x] Consolidate `inference/claude/readme.md` + `inference/anthropic-api/readme.md` → `ai/claude/readme.md`
 - [x] Delete old `inference/` category (also moved ollama + openrouter to `ai/`)
 - [x] **`claude_code.list_models` works end-to-end** — OAuth token from keychain → `/v1/models` → 9 models. Subscription-based, no API key. First-class CLI support.
-- [x] **Rename `op_` prefix on web operations.** Done 2026-05-04 — bulk sed across the whole skills tree (excluding 1Password's `"op_*"` JSON keys). `op_get_conversation` → `get_conversation`, etc.
-- [ ] **Verify two `provides: llm` declarations work.** `claude_api.chat` and `claude_code.chat` both `@provides(llm)` from the same skill. Engine should treat them as separate providers of the same capability. Test end-to-end once MCP routing is wired up.
+- [x] **Rename `op_` prefix on web operations.** Done 2026-05-04 — bulk sed across the whole apps tree (excluding 1Password's `"op_*"` JSON keys). `op_get_conversation` → `get_conversation`, etc.
+- [ ] **Verify two `provides: llm` declarations work.** `claude_api.chat` and `claude_code.chat` both `@provides(llm)` from the same app. Engine should treat them as separate providers of the same service. Test end-to-end once MCP routing is wired up.
 - [ ] **Don't hardcode `ANTHROPIC_VERSION`** — extract it from the Claude Code installation (binary resource or config file) at runtime so it stays current when Claude Code updates.
 - [ ] **Make Claude Code an OAuth provider for Claude** — parallel to how Mimestream is an OAuth provider for Google. When present, the `api` connection should be able to auth via Claude Code's keychain token instead of requiring a separate API key.
 
@@ -35,7 +35,7 @@ during this session; to persist, move to `docs/specs/`.
       `track_scheduled_job`, `sync_scheduled_jobs`, `untrack_scheduled_job`.
       **Decision needed:** same — promote to spec or park indefinitely.
 
-## New capabilities from the ontology sub-agent (in flight)
+## New tools from the ontology sub-agent (in flight)
 
 The sub-agent running against `~/.claude/` is producing three artifacts in
 `_projects/_drafts/`:
@@ -59,14 +59,14 @@ When that lands, the local-state ops get implemented in `claude_code.py`:
 - [ ] `list_plugins()` — reads `plugins/installed_plugins.json` + `known_marketplaces.json`
 - [ ] `get_settings()` — read-only inspection of `settings.json`/`settings.local.json`
 
-## Cross-skill tasks
+## Cross-app tasks
 
 - [ ] **Standardize snake_case for Python files** — add convention to
-      `docs/src/content/docs/skills.md`. All `.py` files in skills should be
+      `docs/src/content/docs/apps/overview.md`. All `.py` files in apps should be
       `snake_case.py` (not `kebab-case.py`). Current codebase is mixed.
 - [ ] **Move `web_read` provides** — `get_conversation` currently has
       `@provides(web_read, urls=["claude.ai/chat/*", "www.claude.ai/chat/*"])`.
-      Verify the URL patterns still match after the skill rename.
+      Verify the URL patterns still match after the app rename.
 - [ ] **Install MCP into Claude Code** — `~/.claude.json` MCP config editing, matching
       the pattern in `dev/cursor/cursor.py`'s `MCP_CONFIG_PATHS` (which already has a
       `# Future: claude-code` placeholder). Extend that or re-implement here.

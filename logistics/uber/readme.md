@@ -17,9 +17,9 @@ product:
 
 Ride history, trip details, receipts, and account info from Uber. Uses Uber's internal GraphQL API at `riders.uber.com/graphql` via browser session cookies. Uber Eats uses a separate RPC API at `ubereats.com/_p/api/`.
 
-> **Before extending this skill**, read:
-> 1. [Reverse Engineering overview](../../docs/reverse-engineering/overview.md) — methodology, tools, progression
-> 2. [Transport & Anti-Bot](../../docs/reverse-engineering/1-transport/index.md) — TLS fingerprinting, WAF bypass, cookie domain filtering
+> **Before extending this app**, read:
+> 1. [Reverse Engineering overview](../../../platform/docs/src/content/docs/apps/reverse-engineering/overview.md) — methodology, tools, progression
+> 2. [Transport & Anti-Bot](../../../platform/docs/src/content/docs/apps/reverse-engineering/1-transport.md) — TLS fingerprinting, WAF bypass, cookie domain filtering
 > 3. [requirements.md](./requirements.md) — captured API shapes, endpoint inventory, auth headers
 > 4. [Uber Eats E2E spec](../../../docs/specs/uber-eats-e2e.md) — the plan for what we're building
 
@@ -35,10 +35,10 @@ Ride history, trip details, receipts, and account info from Uber. Uses Uber's in
 
 ## Setup
 
-Requires an active Uber session in Brave (or another browser). The skill extracts session cookies from the browser's cookie database. No API keys needed.
+Requires an active Uber session in Brave (or another browser). The app extracts session cookies from the browser's cookie database. No API keys needed.
 
 1. Log in to [riders.uber.com](https://riders.uber.com) in Brave
-2. Cookies are extracted automatically when you use the skill
+2. Cookies are extracted automatically when you use the app
 
 ## Transport
 
@@ -49,9 +49,9 @@ POST https://riders.uber.com/graphql
 ```
 
 **IMPORTANT:** Always use `http.headers(waf="cf", accept="json", extra={...})` for all HTTP
-requests in this skill. The engine sets zero default headers — without `http.headers()`, you
+requests in this app. The engine sets zero default headers — without `http.headers()`, you
 get no User-Agent, no sec-ch-*, no Sec-Fetch-* — and some Uber endpoints reject the request.
-We are acting as Brave, so always send what Brave sends. See `docs/skills/sdk.md`.
+We are acting as Brave, so always send what Brave sends. See `docs/apps/overview.md`.
 
 Rides-specific headers (pass via `extra=`):
 - `x-csrf-token: x` (literal string, not a real CSRF token)
@@ -116,7 +116,7 @@ Read: `check_eats_session`, `get_eats_profile`, `list_deliveries`, `get_delivery
 
 Write: `add_to_cart`, `get_cart`, `clear_cart`, `checkout`, `track_delivery`.
 
-Use `agentos call read '{"skill":"uber"}'` or `load({skill:"uber"})` for the live tool manifest with full param schemas — it's generated from the `@returns` decorators, so it's always in sync with the code.
+Use `agentos call apps '{"op":"load","params":{"app":"uber"}}'` or `load({app:"uber"})` for the live tool manifest with full param schemas — it's generated from the `@returns` decorators, so it's always in sync with the code.
 
 ### Ordering flow (MANDATORY for any agent placing a real order)
 
@@ -129,7 +129,7 @@ embarrassing. Follow this sequence every time, in this order:
    carry a hidden `_raw` field with the full catalog payload — `add_to_cart`
    requires it, so pass `offers` items through directly; don't reconstruct.
 3. **Customizations (if any).** `get_item_customizations({store_uuid, item_uuid})`.
-   The skill now auto-resolves section/subsection UUIDs when omitted.
+   The app now auto-resolves section/subsection UUIDs when omitted.
 4. **Pick an explicit delivery address.** `list_addresses()` → choose by
    **`source == "SAVED"` + `label == "HOME"`** first. If `SAVED` is empty
    (common — Uber treats pasted/searched addresses as SUGGESTED until the user
@@ -138,7 +138,7 @@ embarrassing. Follow this sequence every time, in this order:
    (restaurants, shops) into SUGGESTED; auto-picking got a pizza delivered to
    the pizza restaurant on 2026-04-20.
 5. **Build the cart.** `add_to_cart({store_uuid, items, delivery_address_uuid})`.
-   The skill creates a draft via `createDraftOrderV2` and then **pins the
+   The app creates a draft via `createDraftOrderV2` and then **pins the
    address via `updateDraftOrderV2`** — `createDraftOrderV2` silently ignores
    `deliveryAddress` in its own body and inherits whatever the account's
    "active target" is (the thing that bit us).
@@ -168,7 +168,7 @@ Uber closes the chat, **the server returns empty body/head** — no message
 history is persisted to the eater side. If you need a durable record, capture
 messages during `track_delivery` polling, not after.
 
-Also: the skill currently returns `{body, head, messages[]}` on the order
+Also: the app currently returns `{body, head, messages[]}` on the order
 shape rather than proper `conversation` + `message[]` entities. Known kludge.
 Fix when a future order actually produces a non-empty chat we can shape against.
 
@@ -178,12 +178,12 @@ Fix when a future order actually produces a non-empty chat we can shape against.
 
 Two common causes:
 
-1. **Brave cookie staleness.** Brave (and all Chromium browsers) buffer cookie writes and only flush to the on-disk SQLite DB periodically. `get-cookie.py` reads from disk, so after a fresh login the skill sees the *pre-login* cookie set — `uev2.id.session` / `uev2.ts.session` / `jwt-session` are stale, and Uber downgrades the session to visitor. **Fix:** trigger Brave to flush. Easiest: open any ubereats.com page in Brave and let it make at least one authenticated XHR (the `/ramen*/events/recv` or `getUserV1` round-trip will do it). CDP-based `browse-capture.py /orders` also works and is scriptable. Repeat the skill call and it will see the fresh cookies.
+1. **Brave cookie staleness.** Brave (and all Chromium browsers) buffer cookie writes and only flush to the on-disk SQLite DB periodically. `get-cookie.py` reads from disk, so after a fresh login the app sees the *pre-login* cookie set — `uev2.id.session` / `uev2.ts.session` / `jwt-session` are stale, and Uber downgrades the session to visitor. **Fix:** trigger Brave to flush. Easiest: open any ubereats.com page in Brave and let it make at least one authenticated XHR (the `/ramen*/events/recv` or `getUserV1` round-trip will do it). CDP-based `browse-capture.py /orders` also works and is scriptable. Repeat the app call and it will see the fresh cookies.
 2. **You're actually logged out.** Check that `uev2.id.session_v2` and `sid` are in the extracted cookie set. If not, log in to [ubereats.com](https://www.ubereats.com) in Brave.
 
-**`Multiple accounts. Specify account: Joe, default`** — the skill has two `account` entries in credentials (a legacy one and the current session). Pass `account: "default"` to `run()` to disambiguate. We should collapse these — tracked but not yet done.
+**`Multiple accounts. Specify account: Joe, default`** — the app has two `account` entries in credentials (a legacy one and the current session). Pass `account: "default"` to `run()` to disambiguate. We should collapse these — tracked but not yet done.
 
-**`invalid_uuid` / 404 on `getMenuItemV1`** — `get_item_customizations` needs both `section_uuid` and `subsection_uuid`. The skill now auto-fetches them from `getStoreV1` when omitted; if you see this error again, the item UUID itself is stale or wrong.
+**`invalid_uuid` / 404 on `getMenuItemV1`** — `get_item_customizations` needs both `section_uuid` and `subsection_uuid`. The app now auto-fetches them from `getStoreV1` when omitted; if you see this error again, the item UUID itself is stale or wrong.
 
 ## Reverse Engineering Notes
 
@@ -228,7 +228,7 @@ This revealed 32 endpoints (22 read, 10 write) that weren't visible from a singl
 
 Use `agentos browse request` or direct `curl` to test specific endpoints. The auth headers and cookie domain are documented in [requirements.md](./requirements.md).
 
-See [Reverse Engineering overview](../../docs/reverse-engineering/overview.md) for the full methodology and [Browse Toolkit spec](../../../docs/specs/browse-toolkit.md) for tool documentation.
+See [Reverse Engineering overview](../../../platform/docs/src/content/docs/apps/reverse-engineering/overview.md) for the full methodology and [Browse Toolkit spec](../../../docs/specs/browse-toolkit.md) for tool documentation.
 
 ### CDP tips for testing Eats endpoints
 

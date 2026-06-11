@@ -7,27 +7,27 @@ services:
 color: "#4a2a6b"
 ---
 
-# Reverse Engineering Skill
+# Reverse Engineering
 
-**Load this skill before doing ANY reverse engineering work.** Read the
+**Load this app before doing ANY reverse engineering work.** Read the
 principles below and the linked docs before writing code. Every violation
 of these principles costs hours.
 
-This skill is **both a playbook and a toolkit.** The prose below codifies
+This app is **both a playbook and a toolkit.** The prose below codifies
 the golden principles every RE session should follow; the tools (see
 [Toolkit](#toolkit)) give you the runtime machinery to execute them.
 The principles tell you *when* to reach for each tool.
 
 Work is phased — see
-[`_roadmap/p2/browser-stack/reverse-engineering-skill.md`](../../../_roadmap/p2/browser-stack/reverse-engineering-skill.md)
+[`core/_roadmap/p2/browser-stack/reverse-engineering-skill.md`](../../../core/_roadmap/p2/browser-stack/reverse-engineering-skill.md)
 for scope and progress. Phases 2–5 add capture / replay / JS toolkit /
 storage / inspection tools; Phase 1 (this commit) ships the skeleton and
-one placeholder tool to prove the skill-authoring path.
+one placeholder tool to prove the app-authoring path.
 
 ## Toolkit
 
-The RE skill ships Python tools you can call from any agent context
-(`run({skill:"reverse-engineering", tool:"..."})`) — plus a browser-side
+The RE app ships Python tools you can call from any agent context
+(`run({app:"reverse-engineering", tool:"..."})`) — plus a browser-side
 `toolkit.js` injected via CDP for in-page work. Python owns orchestration
 and result handling; JS owns DOM/fetch/storage inside the target page.
 
@@ -126,7 +126,7 @@ downstream operations that need the exact fields the API expects back.
 
 Use CDP (Chrome DevTools Protocol) to Brave for discovery — capture network traffic,
 hook XHR/fetch, inspect DOM, find endpoints. Then implement what you learned as
-Python + `agentos.http` in the skill. No browser dependency at runtime.
+Python + `agentos.http` in the app. No browser dependency at runtime.
 
 **Tools:**
 - `bin/browse-capture.py` — CDP network capture with response bodies
@@ -151,24 +151,24 @@ is set — but don't rely on it. Be explicit.
 Full methodology in the docs repo:
 
 ```
-~/dev/agentos/docs/src/content/docs/reverse-engineering/
-├── overview.md              # Layer model, core principles
-├── 1-transport/index.md     # TLS, headers, WAF bypass, http.headers() rules
-├── 2-discovery/index.md     # JS bundle scanning, GraphQL schema, Apollo cache
-├── 3-auth/index.md          # Credentials, login flows, cookies, CSRF
-├── 4-content/index.md       # HTML scraping, lxml + cssselect, AJAX endpoints
-├── 5-social/index.md        # Social graph modeling
-├── 6-desktop-apps/index.md  # Electron, native apps
-└── 7-mcp/index.md           # Wrapping existing MCP servers
+~/dev/agentos/platform/docs/src/content/docs/apps/reverse-engineering/
+├── overview.md          # Layer model, core principles
+├── 1-transport.md       # TLS, headers, WAF bypass, http.headers() rules
+├── 2-discovery.md       # JS bundle scanning, GraphQL schema, Apollo cache
+├── 3-auth/              # Credentials, login flows, cookies, CSRF
+├── 4-content.md         # HTML scraping, lxml + cssselect, AJAX endpoints
+├── 5-social.md          # Social graph modeling
+├── 6-desktop-apps/      # Electron, native apps
+└── 7-mcp.md             # Wrapping existing MCP servers
 ```
 
-Skill authoring docs:
+App authoring docs:
 
 ```
-~/dev/agentos/docs/src/content/docs/
-├── skills.md           # Skill authoring guide (anatomy, python, operations, sdk, testing)
-├── connections.md      # Auth types, cookie format, provider selection
-└── shapes.md           # Shape design principles, validation
+~/dev/agentos/platform/docs/src/content/docs/
+├── apps/overview.md       # App authoring guide (anatomy, python, operations, sdk, testing)
+├── apps/connections.md    # Auth types, cookie format, provider selection
+└── shapes/overview.md     # Shape design principles, validation
 ```
 
 **Read these before starting.** Especially `sdk.md` for HTTP patterns and
@@ -184,7 +184,7 @@ Skill authoring docs:
 | 4. Content | lxml + cssselect, data-testid selectors, AJAX endpoints | Extracting data from HTML |
 | 5. Social Networks | Social graph traversal, friend lists, activity feeds | Working with social platforms |
 | 6. Desktop Apps | Electron asar, native app IPC, SQLite databases | Local apps without web APIs |
-| 7. MCP Servers | Wrapping existing MCP servers as skills | Someone already built an MCP server |
+| 7. MCP Servers | Wrapping existing MCP servers as apps | Someone already built an MCP server |
 
 ## Key Patterns
 
@@ -220,12 +220,12 @@ Skill authoring docs:
 
 ## Workflow
 
-1. **Read docs** — load this skill, read the RE overview and relevant layer docs
+1. **Read docs** — load this app, read the RE overview and relevant layer docs
 2. **Discover** — CDP to Brave: `browse-capture.py`, XHR/fetch hooks, `Runtime.evaluate`
 3. **Capture** — document endpoint shapes AND data provenance in `requirements.md`
 4. **Replay** — reproduce with `agentos.http` through the engine. Compare field-by-field against browser.
-5. **Implement** — Python skill operation. Raw data preserved for downstream write ops.
-6. **Verify** — test through MCP (`agentos call run`). Check browser renders your data normally.
+5. **Implement** — Python app operation. Raw data preserved for downstream write ops.
+6. **Verify** — test through MCP (`agentos call apps`). Check browser renders your data normally.
 
 ## Lessons Learned (from real bugs)
 
@@ -236,11 +236,11 @@ Skill authoring docs:
 | Name matching bananas→yogurt | Tried fuzzy matching instead of using catalog UUIDs | #2 — didn't trace data provenance |
 | `addItemsToDraftOrderV2` returned 400 "empty items" | Built item shape ourselves instead of using browser's format | #1 — reconstructed instead of replaying |
 
-## Reference Skills
+## Reference Apps
 
-| Skill | Key learnings |
+| App | Key learnings |
 |-------|--------------|
-| `skills/uber/` | RPC API (not GraphQL), XHR for writes, `createDraftOrderV2` with items inline, CDP discovery |
-| `skills/amazon/` | Client hints, Siege bypass, fallback selectors, `SESSION_EXPIRED` |
-| `skills/goodreads/` | Apollo cache, GraphQL schema discovery, multi-connection |
-| `skills/claude/` | Cloudflare stealth, cookie-based API replay |
+| `apps/logistics/uber/` | RPC API (not GraphQL), XHR for writes, `createDraftOrderV2` with items inline, CDP discovery |
+| `apps/logistics/amazon/` | Client hints, Siege bypass, fallback selectors, `SESSION_EXPIRED` |
+| `apps/media/goodreads/` | Apollo cache, GraphQL schema discovery, multi-connection |
+| `apps/ai/claude/` | Cloudflare stealth, cookie-based API replay |

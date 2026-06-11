@@ -40,9 +40,9 @@ Mimestream stores emails in a Core Data SQLite database at:
 ~/Library/Containers/com.mimestream.Mimestream/Data/Library/Application Support/Mimestream/Mimestream.sqlite
 ```
 
-Core Data timestamps use Apple's reference date (2001-01-01). The skill converts these automatically by adding 978307200 seconds.
+Core Data timestamps use Apple's reference date (2001-01-01). The app converts these automatically by adding 978307200 seconds.
 
-## Capabilities
+## Tools
 
 ```
 OPERATION             ENTITY TYPE    DESCRIPTION
@@ -75,6 +75,6 @@ email --attach--> file
 
 ## Notes
 
-- This skill is **read-only** -- it cannot send emails or modify state
+- This app is **read-only** -- it cannot send emails or modify state
 - Mimestream syncs with Gmail, so data reflects what has been synced locally
 - Search covers subject, snippet, body text, sender, and recipients

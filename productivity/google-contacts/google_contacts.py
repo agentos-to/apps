@@ -1,4 +1,4 @@
-"""Google Contacts skill — People API via client.get/post/patch/delete.
+"""Google Contacts app — People API via client.get/post/patch/delete.
 
 Auth token lives in params["auth"]["access_token"], injected by the engine
 from the Mimestream OAuth provider (googleapis.com / contacts scope).

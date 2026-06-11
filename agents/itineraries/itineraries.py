@@ -10,7 +10,7 @@ Tools:
   render(id, format="pdf"|"markdown", ...)   → writes a file, returns path
   render_markdown(reservation)               → pure helper, returns string
 
-Design constraints (see _roadmap/p2/itineraries-skill.md):
+Design constraints (see core/_roadmap/p2/itineraries-skill.md):
   - Shape-contract only: no `_raw.<provider>` reach-in.
   - Pure-Python deps (fpdf2, qrcode+Pillow). Zero system libraries.
   - Helvetica core fonts. Latin-1 only — no Unicode `✈`.
@@ -38,7 +38,7 @@ from agentos import returns, sql, timeout
 GRAPH_DB = "~/.agentos/data/agentos.db"
 
 # Phase-1 neutral accent. Phase 2 overrides this per-reservation by reading
-# `reservation.at.primaryColor` (provider skills stamp primaryColor on their
+# `reservation.at.primaryColor` (provider apps stamp primaryColor on their
 # airline node; airline inherits from the brand mixin).
 FALLBACK_ACCENT = "#2B2F36"   # graphite
 FALLBACK_ON_ACCENT = "#FFFFFF"
@@ -382,7 +382,7 @@ def _tint(rgb: tuple[int, int, int], alpha: float = 0.10) -> tuple[int, int, int
 def _accent_rgb(reservation: dict) -> tuple[int, int, int]:
     """The brand accent for this reservation's header/hero band.
 
-    Reads `reservation.at.primaryColor` (set by provider skills that carry
+    Reads `reservation.at.primaryColor` (set by provider apps that carry
     the airline+brand mixin). Falls back to neutral graphite if missing —
     Phase 1 renders look intentional, not broken, before Phase 2 brand
     data lands.
@@ -480,7 +480,7 @@ class ItineraryPDF(FPDF):
         self.tint = _tint(self.accent)
         self.set_title(_latin1_safe(f"Itinerary {_pnr(reservation)}"))
         self.set_author(_latin1_safe(_provider_name(reservation)))
-        self.set_creator("agentOS - itineraries skill")
+        self.set_creator("agentOS - itineraries app")
 
     # fpdf2 core fonts are Latin-1 only. Route every cell write through
     # the transliteration map so we don't crash on an em-dash or arrow
@@ -824,7 +824,7 @@ class ItineraryPDF(FPDF):
 
     def _render_checkin(self, url: str):
         """QR + URL. If qrcode isn't importable we elide the QR but still
-        show the URL — skill stays useful on a minimal install."""
+        show the URL — app stays useful on a minimal install."""
         y = self.get_y()
         qr_sz = 22.0
         qr_x = MARGIN_X
@@ -926,7 +926,7 @@ def _program_label(at: dict, membership: dict) -> str:
 
 
 def _qr_png(url: str) -> io.BytesIO:
-    """Render a QR code to an in-memory PNG. Imported lazily so the skill
+    """Render a QR code to an in-memory PNG. Imported lazily so the app
     still loads if qrcode/Pillow aren't available yet; the caller catches
     ImportError and drops the QR."""
     import qrcode  # noqa: WPS433 — lazy import by design (see docstring)

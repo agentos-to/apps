@@ -1,4 +1,4 @@
-# Gmail Skill — Requirements & Protocol Reference
+# Gmail App — Requirements & Protocol Reference
 
 ## Connections
 

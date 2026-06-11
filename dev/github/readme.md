@@ -10,7 +10,7 @@ website: "https://github.com"
 
 # GitHub
 
-GitHub via the local `gh` CLI. This skill is intentionally scoped to high-signal workflows that are useful from AgentOS today: issues as `task` entities, pull request utilities, and repository file reads as `document` entities.
+GitHub via the local `gh` CLI. This app is intentionally scoped to high-signal workflows that are useful from AgentOS today: issues as `task` entities, pull request utilities, and repository file reads as `document` entities.
 
 ## Requirements
 
@@ -34,4 +34,4 @@ GitHub via the local `gh` CLI. This skill is intentionally scoped to high-signal
 
 - `read_document` is best for text files tracked in the GitHub contents API.
 - Large binaries, LFS-backed objects, and directories that require tree traversal are out of scope for this first pass.
-- This skill relies on whatever account and host configuration your local `gh` installation already uses.
+- This app relies on whatever account and host configuration your local `gh` installation already uses.

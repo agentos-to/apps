@@ -1,4 +1,4 @@
-"""Uber skill — rides (GraphQL) and Eats (RPC) via browser session cookies."""
+"""Uber app — rides (GraphQL) and Eats (RPC) via browser session cookies."""
 
 import json as _json
 import re as _re
@@ -204,7 +204,7 @@ async def _gql(operation_name: str, query: str, variables: dict | None = None) -
     """Execute a GraphQL query against riders.uber.com.
 
     Ambient cookies + fetch-style browser headers are supplied by the
-    ``web`` connection (client="fetch"); skill only adds x-csrf-token.
+    ``web`` connection (client="fetch"); the app only adds x-csrf-token.
     """
     resp = await client.post(
         GRAPHQL_URL,
@@ -501,7 +501,7 @@ async def get_trip(trip_id: str, **params) -> dict:
 # ---------------------------------------------------------------------------
 # Eats helpers
 # ---------------------------------------------------------------------------
-# Eats API docs: skills/logistics/uber/requirements.md
+# Eats API docs: apps/logistics/uber/requirements.md
 # E2E spec: core/docs/specs/uber-eats-e2e.md
 # Connection docs: docs/src/content/docs/connections.md
 # ---------------------------------------------------------------------------
@@ -510,7 +510,7 @@ async def _eats_post(endpoint: str, body: dict | None = None) -> dict:
     """POST to Uber Eats RPC API. Endpoint is just the operation name (e.g. 'getPastOrdersV1').
 
     Ambient cookies + fetch-style browser headers come from the
-    ``eats`` connection; only x-csrf-token is skill-specific.
+    ``eats`` connection; only x-csrf-token is app-specific.
     """
     resp = await client.post(
         f"{EATS_API_BASE}/{endpoint}",
@@ -1052,7 +1052,7 @@ async def get_store(store_uuid: str, **params) -> dict:
 
     # A store is a place (POI), not an organization. The organization (brand)
     # is the company (e.g. "Sprouts Farmers Market Inc."). The store is a
-    # location of that brand — with address, hours, rating, delivery capability.
+    # location of that brand — with address, hours, rating, delivery availability.
     # See place.yaml — modeled after Google Places API.
     return {
         # Standard fields
@@ -1887,7 +1887,7 @@ async def add_to_cart(store_uuid: str, items: list, delivery_address_uuid: str,
     if not delivery_address_uuid:
         raise RuntimeError(
             "delivery_address_uuid is required. Call list_addresses() to see "
-            "saved/suggested addresses and pick one explicitly. Skills must "
+            "saved/suggested addresses and pick one explicitly. Apps must "
             "never silently inherit whatever address happens to be active on "
             "the Uber account — that previously caused a pizza to be delivered "
             "to the pizza restaurant."

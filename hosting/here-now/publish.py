@@ -97,7 +97,7 @@ async def claim_website(*, slug: str, claim_token: str, **params) -> dict:
 
 @returns({"sent": "boolean", "message": "string"})
 async def signup(*, email: str, **params) -> dict:
-    """Send a magic link to the user's email. They click it, land on the here.now dashboard, and copy their API key. Then add it to AgentOS credentials for permanent publishes (no 24h expiry, 60/hour rate limit). After getting the key: POST /sys/accounts { "skill": "here-now", "account": "default", "api_key": "..." }
+    """Send a magic link to the user's email. They click it, land on the here.now dashboard, and copy their API key. Then add it to AgentOS credentials for permanent publishes (no 24h expiry, 60/hour rate limit). After getting the key: connect({ app: "here-now", key: "..." })
 
         Args:
             email: User's email address
@@ -108,7 +108,7 @@ async def signup(*, email: str, **params) -> dict:
         "message": (
             "Check your inbox for a sign-in link from here.now. "
             "Click it, then copy your API key from the dashboard "
-            "and add it to AgentOS credentials for this skill."
+            "and add it to AgentOS credentials for this app."
         ),
     }
 

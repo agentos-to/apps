@@ -19,7 +19,7 @@ product:
 
 # Claude
 
-One skill for everything Claude. Four access modalities, one product.
+One app for everything Claude. Four access modalities, one product.
 
 | Connection | File | What it does |
 |---|---|---|
@@ -55,11 +55,11 @@ on-disk state under `~/.claude/projects/`.
 
 > **Note:** The `code` connection uses `agent` rather than `chat` because it behaves
 > fundamentally differently from the API — it loops internally over tool calls.
-> Both still `@provides(llm)` so capability routing can pick either.
+> Both still `@provides(llm)` so service routing can pick either.
 >
 > The `_cli` suffix on `list_models_cli` / `list_conversations_cli` /
-> `read_conversation_cli` is because skill tool names share a flat namespace
-> across all `.py` files in the skill, and the same names are already taken by
+> `read_conversation_cli` is because app tool names share a flat namespace
+> across all `.py` files in the app, and the same names are already taken by
 > the `api` and `web` connections (for the Anthropic API model list and
 > claude.ai web chats, respectively).
 
@@ -79,7 +79,7 @@ on-disk state under `~/.claude/projects/`.
 
 ### `api` connection
 1. Get an API key from https://console.anthropic.com/settings/keys
-2. Add credential in AgentOS Settings → Skills → Claude (API Key)
+2. Add credential in AgentOS Settings → Providers → Claude (API Key)
 
 ### `code` connection
 Install Claude Code and log in:

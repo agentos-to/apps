@@ -1,5 +1,5 @@
 """
-macOS Security skill — Keychain audit, token extraction, OAuth app scanning.
+macOS Security app — Keychain audit, token extraction, OAuth app scanning.
 
 All operations run locally against the macOS Keychain and /Applications.
 No network calls. Requires macOS.

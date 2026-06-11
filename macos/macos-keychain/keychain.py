@@ -2,10 +2,10 @@
 
 Wraps `/usr/bin/security find-internet-password` to expose the login
 Keychain's internet-password entries as agentOS credential sources.
-Read-only; nothing in this skill mutates the Keychain.
+Read-only; nothing in this app mutates the Keychain.
 
 The engine's `resolve_login_credentials` pipeline matchmakes
-`@provides(login_credentials)` tools at dispatch time — this skill's
+`@provides(login_credentials)` tools at dispatch time — this app's
 `get_credentials` tool is invoked with a target domain, returns either
 `{provided: true, identifier: <email>}` + a `__secrets__` envelope, or
 `{provided: false}` when no entry matches.
