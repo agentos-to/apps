@@ -129,6 +129,18 @@ carry the `__x_` prefix. If WhatsApp ships a breaking Web update, the
 whatsapp-web.js project is the reference for re-deriving module names
 and call shapes.
 
+**Linked-device branding** (`login` applies this before pairing): the
+phone's Linked Devices entry derives from `WAWebBrowserInfo()` at
+registration — `name` maps to the platform icon via a fixed enum
+(Chrome / Firefox / Opera / Safari / Edge; anything else renders the
+gray "?" + "Other device"), `os` is the parenthetical. The headless UA
+(`HeadlessChrome/…`) parses as "Chrome Headless", which is outside the
+enum — so an unbranded pairing registers as "Other device". `login`
+swaps the module's `defaultExport` in `__debug.modulesMap` (note:
+`window.require()` serves `defaultExport`, not `exports`) so the entry
+registers as "Google Chrome (AgentOS)". The name is minted server-side
+once at pairing and cannot be changed after; re-link to re-brand.
+
 Drift traps already survived (patterns to keep):
 
 - **Unset model fields are truthy sentinel objects**

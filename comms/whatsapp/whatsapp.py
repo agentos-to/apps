@@ -256,6 +256,24 @@ async def login(**params):
     `check_session` to confirm the link took.
     """
     js = """(async () => {
+  // Brand the linked-device entry before pairing. WhatsApp derives the
+  // phone's Linked Devices entry from WAWebBrowserInfo() at registration
+  // time: `name` maps to the platform icon (Chrome|Firefox|Opera|Safari|
+  // Edge — anything else renders the gray "?" / "Other device"), `os` is
+  // the parenthetical. Headless UA parses as "Chrome Headless", which is
+  // outside that enum — hence "Other device". Swap the module export so
+  // the entry reads "Google Chrome (AgentOS)" with the Chrome icon.
+  try {
+    const reg = window.require('__debug').modulesMap.WAWebBrowserInfo;
+    const orig = reg.defaultExport;  // require() serves defaultExport
+    if (typeof orig === 'function' && !orig.__agentos) {
+      const branded = () => ({ ...orig(), name: 'Chrome', os: 'AgentOS' });
+      branded.__agentos = true;
+      reg.defaultExport = branded;
+      if (reg.exports && typeof reg.exports === 'object') reg.exports.default = branded;
+    }
+    window.require('WAWebUA').UA.browser = 'chrome';
+  } catch (e) {}
   const deadline = Date.now() + 25000;
   let C = null, me = null, ref = null;
   while (Date.now() < deadline) {
