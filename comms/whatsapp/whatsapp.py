@@ -378,11 +378,14 @@ async def get_message(*, id, **params):
       for (let i = 0; i < bytes.length; i += CHUNK) {{
         bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
       }}
+      // __x_duration is a string of seconds on ptt/audio/video models.
+      const dur = Number(str(msg.__x_duration));
       out.__media = {{
         data: btoa(bin),
         mime: str(msg.__x_mimetype),
         filename: str(msg.__x_filename),
         size: bytes.length,
+        duration: Number.isFinite(dur) && dur > 0 ? dur : null,
       }};
     }}
     return out;
@@ -394,7 +397,7 @@ async def get_message(*, id, **params):
         ext = (media.get("filename") or "").rsplit(".", 1)[-1] if "." in (media.get("filename") or "") \
             else (mime.split("/")[-1].split(";")[0] or "bin")
         blob = await blobs.put(media["data"], ext=ext)
-        entity["attaches"] = [{
+        attachment = {
             "shape": _media_shape(mime, entity.get("type", "")),
             "name": media.get("filename") or f"{entity.get('type', 'media')} {entity.get('published', '')}".strip(),
             "filename": media.get("filename") or None,
@@ -402,7 +405,10 @@ async def get_message(*, id, **params):
             "size": media.get("size"),
             "path": blob["path"],
             "sha": blob["sha256"],
-        }]
+        }
+        if media.get("duration"):
+            attachment["durationMs"] = int(media["duration"] * 1000)
+        entity["attaches"] = [attachment]
     return entity
 
 
