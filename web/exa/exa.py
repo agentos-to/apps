@@ -10,11 +10,12 @@ Auth architecture (discovered via Playwright reverse engineering):
   - Transport:        http2=False (Vercel blocks httpx's h2 JA4 fingerprint)
 
 Login flow (fully HTTP via engine, no browser needed):
-  1. send_login_code(email)
+  1. login(email) — returns the account if a session is live; otherwise
      - GET  auth.exa.ai/api/auth/csrf       → CSRF token + cookie
      - POST auth.exa.ai/api/auth/signin/email → triggers verification code email
+     - returns auth_challenge{kind: code_sent, continueWith: verify_login_code}
 
-  2. Agent retrieves 6-digit code from email (any provider)
+  2. Agent retrieves 6-digit code from email (any email_lookup provider)
 
   3. verify_login_code(email, code)
      - POST auth.exa.ai/api/verify-otp     → {hashedOtp, rawOtp}
@@ -35,7 +36,7 @@ The dashboard UI masks it, but the API returns it in full.
 Key format: UUID (e.g. "5bcbb3da-e415-44f1-8e57-10e92177f378").
 """
 
-from agentos import claims, client, connection, normalize_email, provides, returns, test, timeout, url, web_read, web_search
+from agentos import account, app_error, claims, client, connection, credentials, normalize_email, provides, returns, test, timeout, url, web_read, web_search
 
 
 connection(
@@ -47,11 +48,18 @@ connection(
     help_url='https://dashboard.exa.ai/api-keys')
 
 connection(
+    'public',
+    description='Exa auth endpoints (csrf, signin/email, verify-otp, callback) — no auth: login PRODUCES the session, so it cannot ride a connection that requires one.',
+    base_url='https://auth.exa.ai',
+    domain='exa.ai',
+    client='browser')
+
+connection(
     'dashboard',
     base_url='https://dashboard.exa.ai',
     domain='exa.ai',
     client='browser',
-    auth={'type': 'cookies', 'domain': '.exa.ai', 'names': ['next-auth.session-token'], 'account': {'check': 'check_session'}, 'login': [{'email_code': True}, {'sso': 'google'}]})
+    auth={'type': 'cookies', 'domain': '.exa.ai', 'names': ['next-auth.session-token']})
 
 
 AUTH_BASE = "https://auth.exa.ai"
@@ -119,24 +127,10 @@ def _extract_set_cookies(resp: dict) -> dict:
 _EXA = {"shape": "product", "url": "https://exa.ai", "name": "Exa"}
 
 
-@test.skip(reason='destructive or unsupported — migrated from yaml')
-@returns("account")
-@claims("primary_user")
-@connection("dashboard")
-@timeout(15)
-async def check_session(**params) -> dict:
-    """Verify Exa dashboard session and identify the logged-in account.
-
-    Cookies come from the ambient per-call jar seeded by the engine from
-    the connection's credential row — app code never threads them.
-
-    Returns the typed `account` shape per the check_session convention
-    in docs/src/content/docs/apps/auth-flows.md — identifier is the
-    canonical email, userId is Exa's internal stable id.
-    """
-    session = await _check_session()
-    if not session:
-        return {"authenticated": False}
+def _account_from_session(session: dict) -> dict:
+    """Project a NextAuth session payload onto the `account` shape —
+    the check_session convention (auth-flows.md): identifier is the
+    canonical email, userId is Exa's internal stable id."""
     user = session.get("user", {})
     email_raw = user.get("email")
     if not email_raw:
@@ -152,41 +146,76 @@ async def check_session(**params) -> dict:
     }
 
 
-@returns({"status": "string", "email": "string", "hint": "string"})
+@account.check
+@test.skip(reason='destructive or unsupported — migrated from yaml')
+@returns("account")
+@claims("primary_user")
 @connection("dashboard")
 @timeout(15)
-async def send_login_code(*, email: str, **params) -> dict:
-    """Trigger a verification code email for the given address.
+async def check_session(**params) -> dict:
+    """Verify Exa dashboard session and identify the logged-in account.
 
-    After calling this, the agent must:
-      1. Check the user's email for the 6-digit code (subject: 'Sign in to Exa Dashboard')
-      2. Call exa.verify_login_code with the email and code
+    Cookies come from the ambient per-call jar seeded by the engine from
+    the connection's credential row — app code never threads them.
+    """
+    session = await _check_session()
+    if not session:
+        return {"authenticated": False}
+    return _account_from_session(session)
+
+
+@account.login
+@returns("account | auth_challenge")
+@connection("public")
+@timeout(20)
+async def login(*, email: str = "", **params) -> dict:
+    """Sign in to the Exa dashboard — or report the already-live session.
+
+    Returns the `account` when a session is live. Otherwise triggers
+    Exa's email verification code and returns an `auth_challenge`
+    (kind: code_sent) whose `continueWith` is verify_login_code.
 
     Args:
-        email: Email address to send the verification code to
+        email: Address to sign in as. Optional — resolved from stored
+            credentials (1Password, Keychain, vault) when omitted.
     """
+    session = await _check_session()
+    if session:
+        return _account_from_session(session)
+
     if not email:
-        return {"__result__": {"error": "email is required"}}
+        creds = await credentials.retrieve(domain=".exa.ai", required=["email"])
+        if creds.get("found"):
+            email = (creds.get("value") or {}).get("email") or creds.get("identifier") or ""
+    if not email:
+        return app_error(
+            "No email to sign in as.",
+            code="NeedsCredentials",
+            required=["email"],
+            hint="Pass `email` explicitly, or store an exa.ai item in a login_credentials provider.",
+        )
+    email = normalize_email(email)
 
     csrf_token = await _get_csrf_token()
     await _send_verification_email(csrf_token, email)
 
     return {
-        "__result__": {
-            "status": "code_sent",
-            "email": email,
-            "hint": (
-                "A 6-digit code was sent to the email. To complete login:\n"
-                "1. Search email for subject 'Sign in to Exa Dashboard' from exa.ai\n"
-                "2. Extract the 6-digit code\n"
-                "3. Call exa.verify_login_code with the email and code"
-            ),
-        }
+        "name": "Exa sign-in code",
+        "kind": "code_sent",
+        "payload": email,
+        "artifact": f"6-digit code sent to {email} — subject 'Sign in to Exa Dashboard'",
+        "instructions": (
+            "Read the 6-digit code (email subject 'Sign in to Exa Dashboard', "
+            "from exa.ai) via any email_lookup provider before involving the "
+            "human, then call verify_login_code(email, code)."
+        ),
+        "continueWith": "verify_login_code",
     }
 
 
-@returns({"status": "string", "email": "string", "team": "string", "userId": "string"})
-@connection("dashboard")
+@returns("account")
+@claims("primary_user")
+@connection("public")
 @timeout(20)
 async def verify_login_code(*, email: str, code: str, **params) -> dict:
     """Verify the 6-digit code and complete login — no browser needed.
@@ -272,12 +301,7 @@ async def verify_login_code(*, email: str, code: str, **params) -> dict:
                 "teamId": session["user"].get("currentTeamId"),
             },
         }],
-        "__result__": {
-            "status": "authenticated",
-            "email": email,
-            "team": session["user"].get("currentTeamName", "unknown"),
-            "userId": session["user"].get("id"),
-        },
+        "__result__": _account_from_session(session),
     }
 
 
@@ -568,20 +592,17 @@ async def read_webpage(*, url: str, **params) -> dict:
     return _map_result(results[0])
 
 
+@account.logout
 @returns({"status": "string", "hint": "string"})
 @connection("dashboard")
 @timeout(10)
 async def logout(**params) -> dict:
     """Sign out of the Exa dashboard and invalidate the session.
 
-    Hits NextAuth's signout endpoint to invalidate the server-side session,
-    then returns a signal to clear the stored credentials.
+    Hits NextAuth's signout endpoint to invalidate the server-side
+    session — cookies ride the ambient per-call jar. Idempotent: signing
+    out a dead session is still a 200 at NextAuth.
     """
-    # Skip the POST if there are no ambient cookies — nothing to sign out.
-    cookies_in = (params.get("auth") or {}).get("cookies") or ""
-    if not cookies_in:
-        return {"__result__": {"status": "already_logged_out"}}
-
     csrf_token = await _get_csrf_token()
     await client.post(
         f"{AUTH_BASE}/api/auth/signout",

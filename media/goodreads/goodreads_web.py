@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from agentos import (
+    account,
     claims,
     client,
     connection,
@@ -40,7 +41,7 @@ connection(
     description='Goodreads user cookies for viewer-scoped data (friends, shelves, books, reviews)',
     base_url='https://www.goodreads.com',
     client='browser',
-    auth={'type': 'cookies', 'domain': '.goodreads.com', 'account': {'check': 'check_session'}},
+    auth={'type': 'cookies', 'domain': '.goodreads.com'},
     label='Goodreads Session',
     help_url='https://www.goodreads.com/user/sign_in',
     optional=True)
@@ -140,6 +141,7 @@ _GOODREADS = {"shape": "organization", "url": "https://goodreads.com", "name": "
 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
+@account.check
 @returns("account")
 @claims("primary_user")
 @connection("web")

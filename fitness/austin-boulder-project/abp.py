@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from typing import Any
 
 from agentos import (
+    account,
     claims,
     client,
     connection,
@@ -42,10 +43,7 @@ connection("portal",
     base_url="https://portal.api.prod.tilefive.com",
     domain=".approach.app",
     client="api",
-    auth={"type": "api_key",
-          "account": {"check":  "check_session",
-                      "login":  "login",
-                      "logout": "logout"}},
+    auth={"type": "api_key"},
     label="ABP Portal Session",
     help_url="https://boulderingproject.portal.approach.app/login")
 
@@ -598,6 +596,7 @@ _ABP = {
 }
 
 
+@account.check
 @test.skip(reason="destructive or unsupported — migrated from yaml")
 @returns("account")
 @claims("primary_user")
@@ -635,6 +634,7 @@ async def check_session(**params) -> dict[str, Any]:
     }
 
 
+@account.login
 @returns({"status": "string", "identifier": "string"})
 @connection("public")
 async def login(*, email: str = "", password: str = "", **params) -> dict[str, Any]:
@@ -707,6 +707,7 @@ async def login(*, email: str = "", password: str = "", **params) -> dict[str, A
 
 
 @test.skip(reason="destructive — revokes the live Cognito session")
+@account.logout
 @returns({"ok": "boolean", "message": "string"})
 @connection("portal")
 async def logout(**params) -> dict[str, Any]:

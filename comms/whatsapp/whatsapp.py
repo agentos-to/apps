@@ -18,7 +18,7 @@ groups). Ops that take a chat accept a JID or a fuzzy name match.
 import json
 import mimetypes
 
-from agentos import app_error, blobs, returns, services, timeout
+from agentos import account, app_error, blobs, qr, returns, services, timeout
 
 _TARGET = "web.whatsapp.com"
 
@@ -157,9 +157,9 @@ async def _eval(body: str, *, wait_ms: int = 20000, timeout_s: int = 45):
         code = value["__error"]
         if code == "auth_required":
             return app_error(
-                "WhatsApp Web is not linked in the engine-owned browser. "
-                "Open the WhatsApp Web tab in the AgentOS Brave instance "
-                "and scan the QR code with your phone (one-time setup).",
+                "WhatsApp Web is not linked. Run whatsapp.login to get a QR "
+                "challenge — scan it with your phone (Settings → Linked "
+                "Devices), then retry this op.",
                 code="NeedsAuth",
             )
         if code == "not_ready":
@@ -181,6 +181,160 @@ async def _eval(body: str, *, wait_ms: int = 20000, timeout_s: int = 45):
         return app_error(f"WhatsApp payload error: {code}", code="PayloadError")
 
     return value
+
+
+# ──────────────────────────────────────────────────────────────────────
+# The account trio — check / login / logout
+# ──────────────────────────────────────────────────────────────────────
+#
+# WhatsApp Web has no cookie credential and no api key: the "session" is
+# the linked-device state inside the engine-owned Brave profile. So these
+# ops don't ride a cookie connection — they call `browser_session` like
+# every other op. They tolerate the logged-out QR screen (the shared
+# `_PRELUDE` fast-fails on it); each carries its own readiness wait.
+
+# Identity JS — shared by check_session and login's logged-in arm. Both
+# callers already hold `me` (the WID) in scope; `me.user` is the phone
+# (no '+'); pushname is the device's display name.
+_IDENTITY_JS = """
+  let pushname = '';
+  try { pushname = window.require('WAWebConnModel').Conn?.pushname || ''; } catch (e) {}
+  const phone = me?.user ? '+' + me.user : null;
+  const acct = {
+    authenticated: true,
+    at: { shape: 'product', name: 'WhatsApp', url: 'https://www.whatsapp.com/' },
+    platform: 'whatsapp',
+  };
+  if (phone) { acct.identifier = phone; acct.handle = phone; acct.phone = phone; }
+  if (pushname) acct.displayName = pushname;
+"""
+
+
+@account.check
+@returns("account")
+@timeout(45)
+async def check_session(**params):
+    """Verify the WhatsApp Web link and identify the account.
+
+    Returns the `account` (phone → identifier, pushname → displayName)
+    when a device is linked. On the QR screen — no link — returns
+    `{authenticated: false}` so the resolver knows to drive `login`.
+    """
+    js = """(async () => {
+  const deadline = Date.now() + 12000;
+  let C = null, me = null;
+  while (Date.now() < deadline) {
+    try {
+      C = window.require('WAWebCollections');
+      me = window.require('WAWebUserPrefsMeUser').getMeUser();
+      if (C && C.Chat && me) break;
+    } catch (e) {}
+    me = null;
+    if (document.querySelector('[data-ref]')) return { authenticated: false };
+    await new Promise(r => setTimeout(r, 250));
+  }
+  if (!me) return { authenticated: false };
+""" + _IDENTITY_JS + """
+  return acct;
+})()"""
+    return await services.call(services.browser_session, params={
+        "target": _TARGET, "js": js, "timeout": 30,
+    })
+
+
+@account.login
+@returns("account | auth_challenge")
+@timeout(60)
+async def login(**params):
+    """Link this WhatsApp — or report the account if already linked.
+
+    Returns the `account` when a device is already linked. Otherwise
+    reads the linked-device QR off the page (`div[data-ref]`, clicking
+    the stale-refresh overlay if WhatsApp has parked one), renders it as
+    a scannable Unicode block, and returns an `auth_challenge{kind: qr}`.
+    The human scans it from any surface (chat, desktop act window); poll
+    `check_session` to confirm the link took.
+    """
+    js = """(async () => {
+  const deadline = Date.now() + 25000;
+  let C = null, me = null, ref = null;
+  while (Date.now() < deadline) {
+    try {
+      C = window.require('WAWebCollections');
+      me = window.require('WAWebUserPrefsMeUser').getMeUser();
+      if (C && C.Chat && me) break;
+    } catch (e) {}
+    me = null;
+    // The QR canvas carries the linking payload as `data-ref`. WhatsApp
+    // parks a click-to-refresh overlay over a stale code after ~5
+    // rotations — click it so a live ref renders, then read it.
+    const stale = document.querySelector('[data-ref] button, button[aria-label*="Reload" i]');
+    if (stale) { try { stale.click(); } catch (e) {} await new Promise(r => setTimeout(r, 600)); }
+    const el = document.querySelector('[data-ref]');
+    const candidate = el && el.getAttribute('data-ref');
+    if (candidate) { ref = candidate; break; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  if (me) {
+""" + _IDENTITY_JS + """
+    return acct;
+  }
+  if (ref) return { __challenge: ref };
+  return { __error: 'not_ready' };
+})()"""
+    value = await services.call(services.browser_session, params={
+        "target": _TARGET, "js": js, "timeout": 45,
+    })
+
+    if isinstance(value, dict) and value.get("__error") == "not_ready":
+        return app_error(
+            "WhatsApp Web hasn't shown a QR code yet — the page may still "
+            "be loading, or the engine-owned browser has no web.whatsapp.com "
+            "tab open.",
+            code="NotReady",
+        )
+    if isinstance(value, dict) and "__challenge" in value:
+        ref = value["__challenge"]
+        return {
+            "name": "Link WhatsApp",
+            "kind": "qr",
+            "payload": ref,
+            "artifact": qr.text(ref),
+            "instructions": (
+                "Scan this QR with WhatsApp on your phone — "
+                "Settings → Linked Devices → Link a Device. The code "
+                "rotates about every 20 seconds; re-run login for a fresh "
+                "one. Poll check_session to confirm the link took."
+            ),
+            "continueWith": "check_session",
+        }
+    # Already linked — the account arm.
+    return value
+
+
+@account.logout
+@returns({"ok": "boolean", "message": "string"})
+@timeout(45)
+async def logout(**params):
+    """Unlink this device — WhatsApp Web's own "Log out".
+
+    Calls `socketLogout(LogoutReason.UserInitiated)` — the exact action
+    the Linked Devices "Log out" button fires. The link is revoked
+    server-side (the phone drops this device), so it's a real logout, not
+    a local-cache wipe; the next `login` renders a fresh QR.
+    """
+    js = """(async () => {
+  try {
+    const reason = window.require('WAWebLogoutReasonConstants').LogoutReason.UserInitiated;
+    await window.require('WAWebSocketLogoutJob').socketLogout(reason);
+    return { ok: true, message: 'WhatsApp device unlinked.' };
+  } catch (e) {
+    return { ok: false, message: 'Logout failed: ' + String(e) };
+  }
+})()"""
+    return await services.call(services.browser_session, params={
+        "target": _TARGET, "js": js, "timeout": 30,
+    })
 
 
 # ──────────────────────────────────────────────────────────────────────
