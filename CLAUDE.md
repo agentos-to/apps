@@ -12,9 +12,9 @@ invent.*
 The docs live on the **system volume** — read them with
 `read({id:"<doc-id>", volume:"system"})` (MCP) or
 `agentos call data '{"op":"read","params":{"id":"<doc-id>","volume":"system"}}'`
-(CLI). No engine running? The same docs are the YAML files in
+(CLI). No engine running? The same docs are markdown files in
 [`core/system-docs/`](../core/system-docs/) — `<doc-id>` maps to a
-file there (e.g. `apps-overview` → `apps/overview.yaml`).
+file there (e.g. `apps-overview` → `apps/overview.md`).
 
 ## Read first (the cheat sheet)
 
