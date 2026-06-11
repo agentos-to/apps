@@ -9,20 +9,28 @@ canonical docs below. Do not guess.** The golden rule of this
 repo is: *there is always an existing pattern. Copy it, don't
 invent.*
 
+The docs live on the **system volume** — read them with
+`read({id:"<doc-id>", volume:"system"})` (MCP) or
+`agentos call data '{"op":"read","params":{"id":"<doc-id>","volume":"system"}}'`
+(CLI). No engine running? The same docs are the YAML files in
+[`core/system-docs/`](../core/system-docs/) — `<doc-id>` maps to a
+file there (e.g. `apps-overview` → `apps/overview.yaml`).
+
 ## Read first (the cheat sheet)
 
-| Task | Read | Canonical example |
+| Task | Read (`id` on the system volume) | Canonical example |
 |---|---|---|
-| Building any app | [`apps/overview.md`](../platform/docs/src/content/docs/apps/overview.md) | — |
-| Adding login / auth | [`apps/adding-login.md`](../platform/docs/src/content/docs/apps/adding-login.md) | ABP, Exa, Goodreads |
-| Auth internals (cookies, tokens, providers) | [`apps/auth-flows.md`](../platform/docs/src/content/docs/apps/auth-flows.md) | — |
-| Credential matchmaking (how `login` gets `{email,password}`) | [`apps/adding-login.md#the-three-credential-resolution-paths`](../platform/docs/src/content/docs/apps/adding-login.md) | `abp.py::login` |
-| Multi-step flows (OTP / SMS / OAuth consent) | [`apps/auth-flows.md#multi-step-flows`](../platform/docs/src/content/docs/apps/auth-flows.md) | `exa.py::send_login_code` / `verify_login_code` |
-| Reverse engineering an API | [`apps/reverse-engineering/`](../platform/docs/src/content/docs/apps/reverse-engineering/) | `united/requirements.md` for endpoint inventory style |
-| Connections, auth types, `@connection` | [`apps/connections.md`](../platform/docs/src/content/docs/apps/connections.md) | — |
-| Writing the `logout` tool | [`apps/adding-login.md#do-i-need-a-logout-tool`](../platform/docs/src/content/docs/apps/adding-login.md) | `abp.py::logout` |
-| How auth resolution picks one cookie | [`architecture/auth-resolution.md`](../platform/docs/src/content/docs/architecture/auth-resolution.md) | — |
-| Shapes (ontology) | `../platform/ontology/shapes/*.yaml` | — |
+| Building any app | `apps-overview` | — |
+| Adding login / auth | `apps-adding-login` | ABP, Exa, Goodreads |
+| Auth internals (cookies, tokens, providers) | `apps-auth-flows` | — |
+| Credential matchmaking (how `login` gets `{email,password}`) | `apps-adding-login` §"The three credential-resolution paths" | `abp.py::login` |
+| Multi-step flows (OTP / SMS / OAuth consent) | `apps-auth-flows` §"Multi-step flows" | `exa.py::send_login_code` / `verify_login_code` |
+| Reverse engineering an API | `reverse-engineering-overview` (links the whole series) | `united/requirements.md` for endpoint inventory style |
+| Connections, auth types, `@connection` | `apps-connections` | — |
+| Writing the `logout` tool | `apps-adding-login` §"Do I need a logout tool" | `abp.py::logout` |
+| How auth resolution picks one cookie | `architecture-auth-resolution` | — |
+| App data/cache, `__secrets__`, expressions | `apps-data` | — |
+| Shapes (ontology) | `shapes-overview`; the YAMLs: `../platform/ontology/shapes/*.yaml` | — |
 
 ## Universal rules for this repo
 
@@ -57,7 +65,7 @@ invent.*
   provider service.** `@provides(login_credentials)` apps
   today: `secrets/onepassword`, `macos/macos-keychain`.
 - **Reverse engineering starts with CDP capture**, not body-only
-  replay. See `docs/.../reverse-engineering/`. United's
+  replay. See `reverse-engineering-overview` on the system volume. United's
   `requirements.md` is a good reference for what a thorough
   capture log looks like.
 
