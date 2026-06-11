@@ -17,7 +17,7 @@ groups). Ops that take a chat accept a JID or a fuzzy name match.
 
 import json
 
-from agentos import capability, returns, skill_error, timeout
+from agentos import blobs, capability, returns, skill_error, timeout
 
 _TARGET = "web.whatsapp.com"
 
@@ -314,19 +314,96 @@ async def list_messages(*, conversation_id=None, is_unread=None, limit=200, **pa
     """)
 
 
+# Media payloads bigger than this stay un-hydrated: the bytes cross the
+# CDP eval channel as base64 inside one JSON value, and the Python
+# worker's stdin reader caps a line at 16MB. ~10MB binary ≈ 13.7MB
+# base64 — comfortably under with room for the rest of the envelope.
+_MEDIA_HYDRATION_CAP = 10 * 1024 * 1024
+
+_MEDIA_TYPES = ("image", "video", "ptt", "audio", "document", "sticker")
+
+
+def _media_shape(mime: str, msg_type: str) -> str:
+    """The concrete file subtype for an attachment — widest type `file`."""
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/") or msg_type == "ptt":
+        return "sound"
+    return "file"
+
+
 @returns("message")
-@timeout(60)
+@timeout(120)
 async def get_message(*, id, **params):
     """Get one message by its serialized id.
+
+    Media messages (image / video / voice note / document / sticker)
+    hydrate on read: the decrypted payload is downloaded in-page,
+    stored in the engine's content-addressed blob store, and returned
+    as a file entity attached to the message — `attaches[0].path` is
+    the on-disk file. Payloads over 10MB stay caption-only (the readme
+    documents the cap).
 
     Args:
         id: Serialized message id (from `list_messages` results).
     """
-    return await _eval(f"""
+    entity = await _eval(f"""
     const msg = Msg.get({json.dumps(id)});
     if (!msg) return {{ __error: 'not_found', what: 'message', ref: {json.dumps(id)} }};
-    return mapMsg(msg);
-    """)
+    const out = mapMsg(msg);
+    const mediaTypes = {json.dumps(list(_MEDIA_TYPES))};
+    const size = Number.isFinite(msg.__x_size) ? msg.__x_size : 0;
+    if (mediaTypes.includes(out.type) && size > 0 && size <= {_MEDIA_HYDRATION_CAP}) {{
+      // Ensure the encrypted payload is fetched (no-op when already
+      // RESOLVED), then decrypt it the way the UI does on click.
+      if (msg.mediaData && msg.mediaData.mediaStage !== 'RESOLVED') {{
+        await msg.downloadMedia({{ downloadEvenIfExpensive: true, rmrReason: 1 }});
+      }}
+      const buf = await window.require('WAWebDownloadManager').downloadManager
+        .downloadAndMaybeDecrypt({{
+          directPath: msg.directPath,
+          encFilehash: msg.encFilehash,
+          filehash: msg.filehash,
+          mediaKey: msg.mediaKey,
+          mediaKeyTimestamp: msg.mediaKeyTimestamp,
+          type: msg.type,
+          signal: new AbortController().signal,
+          downloadQpl: {{ addAnnotations() {{ return this; }}, addPoint() {{ return this; }} }},
+        }});
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {{
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }}
+      out.__media = {{
+        data: btoa(bin),
+        mime: str(msg.__x_mimetype),
+        filename: str(msg.__x_filename),
+        size: bytes.length,
+      }};
+    }}
+    return out;
+    """, timeout_s=90)
+
+    media = entity.pop("__media", None) if isinstance(entity, dict) else None
+    if media and media.get("data"):
+        mime = media.get("mime") or "application/octet-stream"
+        ext = (media.get("filename") or "").rsplit(".", 1)[-1] if "." in (media.get("filename") or "") \
+            else (mime.split("/")[-1].split(";")[0] or "bin")
+        blob = await blobs.put(media["data"], ext=ext)
+        entity["attaches"] = [{
+            "shape": _media_shape(mime, entity.get("type", "")),
+            "name": media.get("filename") or f"{entity.get('type', 'media')} {entity.get('published', '')}".strip(),
+            "filename": media.get("filename") or None,
+            "mimeType": mime,
+            "size": media.get("size"),
+            "path": blob["path"],
+            "sha": blob["sha256"],
+        }]
+    return entity
 
 
 @returns("message[]")

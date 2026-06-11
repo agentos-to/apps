@@ -2,6 +2,8 @@
 id: whatsapp
 name: WhatsApp
 description: WhatsApp messages, contacts, and sending via live WhatsApp Web
+capabilities:
+  - blobs
 color: "#2CD46B"
 website: "https://www.whatsapp.com/"
 product:
@@ -56,7 +58,14 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
   load + Store init. Warm ops run in well under a second.
 - Media messages map with `type` (`image`, `video`, `ptt`, …) and use the
   caption as `content` (never the preview thumbnail WhatsApp stores in the
-  body field); media payloads themselves are not downloaded.
+  body field). **`get_message` hydrates the payload**: the decrypted bytes
+  land in the engine blob store and the message returns with an attached
+  file entity (`attaches[0].path` is the on-disk file, typed `image` /
+  `video` / `sound` / `file`, deduped by content hash). `list_messages`
+  and live `watch` messages stay caption-only — re-read one message to
+  pull its payload. Payloads over 10MB stay un-hydrated (the bytes cross
+  the eval channel as one base64 JSON value; the worker caps a line at
+  16MB).
 - Meta AI responses (`rich_response` type) have their text extracted from
   response fragments automatically.
 - `send_message` returns the sent message entity (same shape as
@@ -119,3 +128,14 @@ Drift traps already survived (patterns to keep):
 - **`unreadCount: -1` is the manual marked-unread flag**, not a count.
   The UI's mark-as-read clears `chat.markedUnread = false` *then* sends
   seen; `sendSeen` alone early-returns while the flag is set.
+- **Media download is `WAWebDownloadManager.downloadManager
+  .downloadAndMaybeDecrypt({directPath, encFilehash, filehash, mediaKey,
+  mediaKeyTimestamp, type, signal, downloadQpl})`** → decrypted
+  ArrayBuffer. `downloadQpl` accepts a chainable mock (`addAnnotations`/
+  `addPoint` returning `this`). The higher-level `downloadMsg` path
+  resolves the mediaObject but parks the bytes out of reach
+  (`mediaBlob` stays null, `contentInfo.staticUrl` empty in headless).
+- **`__debug.modulesMap` only enumerates LOADED modules** —
+  `window.require` lazy-loads on demand. A module missing from the map
+  (e.g. `WAWebDownloadManager`) may still require() fine; probe by name
+  before concluding drift.
