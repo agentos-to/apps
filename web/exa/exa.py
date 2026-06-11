@@ -1,42 +1,33 @@
 """
-exa.py — Dashboard auth and API key management for Exa
+exa.py — Exa search/extraction (api_key) + dashboard via the browser session.
 
-Auth architecture (discovered via Playwright reverse engineering):
-  - Auth domain:      auth.exa.ai (NextAuth.js / Auth.js)
-  - Dashboard domain: dashboard.exa.ai
-  - Login method:     Email verification code (6-digit, NOT a magic link)
-  - Session:          JWT in `next-auth.session-token` cookie (.exa.ai)
-  - Protection:       Vercel Security Checkpoint on dashboard.exa.ai
-  - Transport:        http2=False (Vercel blocks httpx's h2 JA4 fingerprint)
+Two halves, two auth substrates:
 
-Login flow (fully HTTP via engine, no browser needed):
-  1. login(email) — returns the account if a session is live; otherwise
-     - GET  auth.exa.ai/api/auth/csrf       → CSRF token + cookie
-     - POST auth.exa.ai/api/auth/signin/email → triggers verification code email
-     - returns auth_challenge{kind: code_sent, continueWith: verify_login_code}
+- **API half** (`search`, `read_webpage`): plain HTTP against api.exa.ai
+  with a portable api_key from the vault — the `api` connection.
+- **Dashboard half** (account trio + key management): every op is a
+  `fetch()` evaluated *inside* a tab of the engine-owned browser via the
+  `browser_session` service (the WhatsApp pattern). The session is the
+  browser profile itself — `next-auth.session-token` on `.exa.ai`,
+  written by NextAuth's own Set-Cookie, never extracted, never stored in
+  the vault, never seen by this app. Requests originate from the real
+  browser, so Vercel's security checkpoint and Cloudflare cookies stay
+  live by construction.
 
-  2. Agent retrieves 6-digit code from email (any email_lookup provider)
+Dashboard architecture (NextAuth.js, email verification code):
+  - auth.exa.ai       — csrf, signin/email, verify-otp, callback, signout
+  - dashboard.exa.ai  — session check + key/team endpoints
+  Ops run same-origin in the matching tab; the profile carries the
+  `.exa.ai` cookie across both hosts.
 
-  3. verify_login_code(email, code)
-     - POST auth.exa.ai/api/verify-otp     → {hashedOtp, rawOtp}
-     - Construct token = hashedOtp:rawOtp
-     - GET  auth.exa.ai/api/auth/callback/email?token=...&email=...
-       → sets next-auth.session-token cookie
-     - Validates session, stores cookies via __secrets__
-
-Dashboard API (authenticated, cookie-based):
-  GET /api/auth/session         → { user: { email, id, currentTeamId, teams }, expires }
-  GET /api/get-api-keys         → { apiKeys: [{ id, name, enabled, ... }] }
-  GET /api/get-teams            → { teams: [{ id, name, role, customRateLimit, ... }] }
-  GET /api/service-api-keys     → { serviceApiKeys: [...] }
-  GET /api/get-websets-billing   → { hasAccess: bool }
-
-Key discovery: the `id` field in get-api-keys IS the full API key value.
-The dashboard UI masks it, but the API returns it in full.
-Key format: UUID (e.g. "5bcbb3da-e415-44f1-8e57-10e92177f378").
+The API key secret lives in `legacyBearerSecret` of /api/get-api-keys
+(`id` is the row UUID, `publicId` the display handle — neither
+authenticates).
 """
 
-from agentos import account, app_error, claims, client, connection, credentials, normalize_email, provides, returns, test, timeout, url, web_read, web_search
+import json
+
+from agentos import account, app_error, claims, client, connection, credentials, normalize_email, provides, returns, services, test, timeout, web_read, web_search
 
 
 connection(
@@ -47,77 +38,78 @@ connection(
     label='API Key',
     help_url='https://dashboard.exa.ai/api-keys')
 
-connection(
-    'public',
-    description='Exa auth endpoints (csrf, signin/email, verify-otp, callback) — no auth: login PRODUCES the session, so it cannot ride a connection that requires one.',
-    base_url='https://auth.exa.ai',
-    domain='exa.ai',
-    client='browser')
 
-connection(
-    'dashboard',
-    base_url='https://dashboard.exa.ai',
-    domain='exa.ai',
-    client='browser',
-    auth={'type': 'cookies', 'domain': '.exa.ai', 'names': ['next-auth.session-token']})
-
-
-AUTH_BASE = "https://auth.exa.ai"
 API_BASE = "https://api.exa.ai"
-DASHBOARD_BASE = "https://dashboard.exa.ai"
 CALLBACK_URL = "https://dashboard.exa.ai/"
 
-
-async def _get_csrf_token() -> str:
-    """Fetch CSRF token from NextAuth. The per-call jar captures the csrf cookie."""
-    resp = await client.get(f"{AUTH_BASE}/api/auth/csrf")
-    if not resp["ok"]:
-        raise RuntimeError(f"CSRF fetch failed: HTTP {resp['status']}")
-    return resp["json"]["csrfToken"]
+# browser_session targets — a URL substring; the engine opens
+# https://<target>/ in the engine-owned browser when no tab matches.
+_DASHBOARD = "dashboard.exa.ai"
+_AUTH = "auth.exa.ai"
 
 
-async def _send_verification_email(csrf_token: str, email: str) -> dict:
-    """POST to NextAuth email signin endpoint to trigger the verification code email."""
-    resp = await client.post(
-        f"{AUTH_BASE}/api/auth/signin/email",
-        data={
-            "email": email,
-            "csrfToken": csrf_token,
-            "callbackUrl": CALLBACK_URL,
-            "json": "true",
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    if not resp["ok"]:
-        raise RuntimeError(f"Signin email failed: HTTP {resp['status']}")
-    return resp["json"]
+# Readiness wait, prepended to every op body. A freshly opened tab is
+# still at about:blank when our JS first runs — a relative-URL fetch has
+# no origin to resolve against, and a cross-origin fetch wouldn't carry
+# the `.exa.ai` cookie. So we wait until the document has settled on an
+# `.exa.ai` origin before the body runs. We wait for the *family*, not a
+# specific host, because NextAuth bounces an unauthenticated dashboard
+# visit to auth.exa.ai: where the tab lands IS the auth signal, and each
+# body branches on `location.hostname`. This is exa's analogue of
+# WhatsApp's `_PRELUDE` Store-readiness wait.
+_PRELUDE = """
+const __deadline = Date.now() + 15000;
+while (location.hostname.indexOf('exa.ai') === -1 || document.readyState !== 'complete') {
+  if (Date.now() > __deadline) return { __error: 'tab_not_ready' };
+  await new Promise(r => setTimeout(r, 200));
+}
+const __onDashboard = location.hostname.indexOf('dashboard.') === 0;
+"""
+
+
+async def _eval(target: str, body: str, *, timeout_s: int = 45):
+    """Run an op body inside the target's tab in the engine-owned browser.
+
+    The engine matchmakes the `browser_session` provider, opens the tab
+    (and launches the browser) when needed, and returns the JS value.
+    The body runs only once the tab has settled on an `.exa.ai` origin,
+    with `__onDashboard` in scope telling it whether NextAuth kept us on
+    the dashboard (authenticated) or bounced us to auth (logged out).
+    """
+    return await services.call(services.browser_session, params={
+        "target": target,
+        "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
+        "timeout": timeout_s,
+    })
+
+
+# Session probe. If NextAuth bounced us off the dashboard, we're logged
+# out — no need to call the API. On the dashboard, NextAuth returns `{}`
+# (not an error) for anonymous visitors, so `user` is the live signal.
+_SESSION_JS = """
+if (!__onDashboard) return null;
+const r = await fetch('/api/auth/session', { cache: 'no-store' });
+if (!r.ok) return { __error: 'http_' + r.status };
+const data = await r.json().catch(() => null);
+return (data && data.user) ? data : null;
+"""
 
 
 async def _check_session() -> dict | None:
-    """Check the current session on the dashboard. Returns user data or None."""
-    resp = await client.get(f"{DASHBOARD_BASE}/api/auth/session")
-    if resp["status"] != 200:
+    """Live NextAuth session from the dashboard tab, or None."""
+    value = await _eval(_DASHBOARD, _SESSION_JS)
+    if not isinstance(value, dict) or not value.get("user"):
         return None
-    data = resp["json"]
-    return data if data and data.get("user") else None
+    return value
 
 
-def _extract_set_cookies(resp: dict) -> dict:
-    """Extract Set-Cookie values from a response header dict."""
-    cookies = {}
-    raw = resp.get("headers", {}).get("set-cookie", "")
-    if not raw:
-        return cookies
-    # set-cookie header may be comma-separated (multiple cookies)
-    for part in raw.split(", "):
-        # Each cookie is "name=value; Path=...; ..."
-        if "=" in part.split(";")[0]:
-            nv = part.split(";")[0]
-            name, _, value = nv.partition("=")
-            name = name.strip()
-            if name:
-                cookies[name] = value.strip()
-    return cookies
+def _needs_auth():
+    return app_error(
+        "No live Exa dashboard session in the AgentOS browser profile. "
+        "Run exa.login — it sends a 6-digit code to the account email; "
+        "verify_login_code completes the sign-in inside the browser.",
+        code="NeedsAuth",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,13 +142,13 @@ def _account_from_session(session: dict) -> dict:
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("account")
 @claims("primary_user")
-@connection("dashboard")
-@timeout(15)
+@connection("none")
+@timeout(60)
 async def check_session(**params) -> dict:
-    """Verify Exa dashboard session and identify the logged-in account.
+    """Verify the Exa dashboard session and identify the logged-in account.
 
-    Cookies come from the ambient per-call jar seeded by the engine from
-    the connection's credential row — app code never threads them.
+    The session lives in the engine-owned browser profile; this op asks
+    NextAuth from inside the dashboard tab. No cookie ever reaches the app.
     """
     session = await _check_session()
     if not session:
@@ -166,14 +158,15 @@ async def check_session(**params) -> dict:
 
 @account.login
 @returns("account | auth_challenge")
-@connection("public")
-@timeout(20)
+@connection("none")
+@timeout(90)
 async def login(*, email: str = "", **params) -> dict:
     """Sign in to the Exa dashboard — or report the already-live session.
 
-    Returns the `account` when a session is live. Otherwise triggers
-    Exa's email verification code and returns an `auth_challenge`
-    (kind: code_sent) whose `continueWith` is verify_login_code.
+    Returns the `account` when the browser profile holds a live session.
+    Otherwise triggers Exa's email verification code from inside the
+    auth tab and returns an `auth_challenge` (kind: code_sent) whose
+    `continueWith` is verify_login_code.
 
     Args:
         email: Address to sign in as. Optional — resolved from stored
@@ -196,8 +189,25 @@ async def login(*, email: str = "", **params) -> dict:
         )
     email = normalize_email(email)
 
-    csrf_token = await _get_csrf_token()
-    await _send_verification_email(csrf_token, email)
+    value = await _eval(_AUTH, f"""
+const csrf = await (await fetch('/api/auth/csrf')).json().catch(() => null);
+if (!csrf || !csrf.csrfToken) return {{ __error: 'csrf_failed' }};
+const body = new URLSearchParams({{
+  email: {json.dumps(email)},
+  csrfToken: csrf.csrfToken,
+  callbackUrl: {json.dumps(CALLBACK_URL)},
+  json: 'true',
+}});
+const r = await fetch('/api/auth/signin/email', {{ method: 'POST', body }});
+if (!r.ok) return {{ __error: 'http_' + r.status }};
+return {{ sent: true }};
+""")
+    if not isinstance(value, dict) or value.get("__error"):
+        detail = value.get("__error") if isinstance(value, dict) else value
+        return app_error(
+            f"Triggering the verification email failed in the auth tab: {detail}",
+            code="SigninFailed",
+        )
 
     return {
         "name": "Exa sign-in code",
@@ -215,185 +225,97 @@ async def login(*, email: str = "", **params) -> dict:
 
 @returns("account")
 @claims("primary_user")
-@connection("public")
-@timeout(20)
+@connection("none")
+@timeout(90)
 async def verify_login_code(*, email: str, code: str, **params) -> dict:
-    """Verify the 6-digit code and complete login — no browser needed.
+    """Verify the 6-digit code and complete login inside the browser.
 
-    Flow:
-      1. POST /api/verify-otp with {email, otp} → {hashedOtp, rawOtp}
-      2. Construct NextAuth callback token = hashedOtp:rawOtp
-      3. GET /api/auth/callback/email?token=...&email=... → session cookie
-      4. Validate session and store cookies via __secrets__
+    Runs Exa's verify-otp + NextAuth callback same-origin in the auth
+    tab. The callback's Set-Cookie lands `next-auth.session-token`
+    directly in the browser profile — the profile IS the session store;
+    nothing is extracted or vaulted. Confirms by reading the session
+    back from the dashboard tab.
     """
     if not email or not code:
-        return {"__result__": {"error": "email and code are required"}}
+        return app_error("email and code are required.", code="BadParams")
+    email = normalize_email(email)
 
-    # Establish CSRF session (needed for the callback to accept our request).
-    # The per-call jar captures the csrf cookie automatically for the
-    # subsequent POSTs.
-    await _get_csrf_token()
+    value = await _eval(_AUTH, f"""
+await fetch('/api/auth/csrf');
+const r = await fetch('/api/verify-otp', {{
+  method: 'POST',
+  headers: {{ 'Content-Type': 'application/json' }},
+  body: JSON.stringify({{ email: {json.dumps(email)}, otp: {json.dumps(code)} }}),
+}});
+if (r.status !== 200) {{
+  const err = await r.json().catch(() => null);
+  return {{ __error: (err && err.error) || ('http_' + r.status) }};
+}}
+const data = await r.json();
+if (!data.hashedOtp) return {{ __error: 'verify-otp returned no hashedOtp' }};
+const qs = new URLSearchParams({{
+  email: {json.dumps(email)},
+  token: data.hashedOtp + ':' + data.rawOtp,
+  callbackUrl: {json.dumps(CALLBACK_URL)},
+}});
+// redirect:'manual' — the 302 itself carries the Set-Cookie; following
+// it cross-origin to the dashboard would only trip CORS.
+const cb = await fetch('/api/auth/callback/email?' + qs, {{ redirect: 'manual' }});
+if (cb.type !== 'opaqueredirect' && cb.status >= 400) {{
+  return {{ __error: 'callback_http_' + cb.status }};
+}}
+return {{ ok: true }};
+""")
+    if not isinstance(value, dict) or value.get("__error"):
+        detail = value.get("__error") if isinstance(value, dict) else value
+        return app_error(
+            f"Code verification failed: {detail}",
+            code="VerifyFailed",
+        )
 
-    # Verify the OTP — Exa's custom endpoint validates the 6-digit code
-    resp = await client.post(
-        f"{AUTH_BASE}/api/verify-otp",
-        json={"email": email.lower(), "otp": code},
-    )
-    if resp["status"] != 200:
-        error_msg = "Invalid or expired verification code"
-        if resp.get("json"):
-            error_msg = resp["json"].get("error", error_msg)
-        return {"__result__": {"error": error_msg}}
-
-    data = resp["json"]
-    hashed_otp = data.get("hashedOtp", "")
-    raw_otp = data.get("rawOtp", "")
-
-    if not hashed_otp:
-        return {"__result__": {"error": "Unexpected verify-otp response", "raw": data}}
-
-    # Construct the token NextAuth expects: hashedOtp:rawOtp
-    # NextAuth hashes this with SHA256+secret and compares to the DB entry.
-    token = f"{hashed_otp}:{raw_otp}"
-    callback_url = url.build(
-        f"{AUTH_BASE}/api/auth/callback/email",
-        params={
-            "email": email.lower(),
-            "token": token,
-            "callbackUrl": CALLBACK_URL,
-        },
-    )
-
-    # Hit the NextAuth callback — this sets the session-token cookie
-    resp2 = await client.get(callback_url)
-    if resp2["status"] >= 400:
-        return {"__result__": {"error": f"Callback failed: HTTP {resp2['status']}"}}
-
-    # Extract session token from Set-Cookie header to persist via __secrets__.
-    # (The per-call jar also captured it, but there's no credential row yet
-    # for this email — __secrets__ is what creates the row.)
-    set_cookies = _extract_set_cookies(resp2)
-    session_token = set_cookies.get("next-auth.session-token")
-
-    if not session_token:
-        return {"__result__": {"error": "Login succeeded but no session token received"}}
-
-    # Validate the freshly minted session. The per-call jar already has the
-    # session-token cookie from the callback response.
     session = await _check_session()
     if not session:
-        return {"__result__": {"error": "Session token invalid after login"}}
-
-    cookies = {"next-auth.session-token": session_token}
-
-    return {
-        "__secrets__": [{
-            "domain": "exa.ai",
-            "identifier": email,
-            "itemType": "cookie",
-            "label": "Exa Dashboard Session",
-            "source": "exa",
-            "value": cookies,
-            "metadata": {
-                "masked": {"next-auth.session-token": "••••(JWT)"},
-                "dashboardUrl": DASHBOARD_BASE,
-                "userId": session["user"].get("id"),
-                "teamId": session["user"].get("currentTeamId"),
-            },
-        }],
-        "__result__": _account_from_session(session),
-    }
-
-
-@returns({"status": "string", "identifier": "string", "domain": "string", "userId": "string", "team": "string"})
-@connection("dashboard")
-@timeout(15)
-async def store_session_cookies(*, email: str, session_token: str, cf_clearance: str = "", **params) -> dict:
-    """Store browser-extracted session cookies for authenticated dashboard access.
-
-    Fallback for when verify_login_code can't be used (e.g. Google SSO).
-    Validates the session, then stores the cookies via __secrets__.
-
-    Args:
-        email: Account email address
-        session_token: next-auth.session-token cookie value
-        cf_clearance: Optional Cloudflare clearance cookie
-    """
-    if not email or not session_token:
-        return {"__result__": {"error": "email and session_token are required"}}
-
-    cookies = {"next-auth.session-token": session_token}
-    if cf_clearance:
-        cookies["cf_clearance"] = cf_clearance
-
-    # Validation uses the ambient per-call jar — but for THIS op the jar
-    # was seeded from whatever already-stored cookies existed (maybe none).
-    # The user-supplied session_token is what we're validating, so push it
-    # onto the ambient jar for the duration of this call by overriding
-    # `cookies_in` via a per-request `cookies=` kwarg the engine honors.
-    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
-    resp = await client.get(
-        f"{DASHBOARD_BASE}/api/auth/session",
-        cookies=cookie_header,
-    )
-    session = resp["json"] if resp.get("status") == 200 else None
-    session = session if session and session.get("user") else None
-    if not session:
-        return {"__result__": {"error": "Session token invalid or expired"}}
-
-    return {
-        "__secrets__": [{
-            "domain": "exa.ai",
-            "identifier": email,
-            "itemType": "cookie",
-            "label": "Exa Dashboard Session",
-            "source": "exa",
-            "value": cookies,
-            "metadata": {
-                "masked": {"next-auth.session-token": "••••(JWT)"},
-                "dashboardUrl": DASHBOARD_BASE,
-                "userId": session["user"].get("id"),
-                "teamId": session["user"].get("currentTeamId"),
-            },
-        }],
-        "__result__": {
-            "status": "authenticated",
-            "identifier": email,
-            "domain": "exa.ai",
-            "userId": session["user"].get("id"),
-            "team": session["user"].get("teams", [{}])[0].get("name"),
-        },
-    }
-
-
-async def _require_session() -> dict:
-    """Check session and raise on failure so the engine's cookie retry fires."""
-    session = await _check_session()
-    if not session:
-        raise Exception("Unauthorized (HTTP 403): Exa dashboard session expired or invalid")
-    return session
+        return app_error(
+            "The callback ran but no session is live — the code was likely "
+            "rejected (NextAuth signals failure via a redirect, not a "
+            "status). Request a fresh code with login and retry.",
+            code="VerifyFailed",
+        )
+    return _account_from_session(session)
 
 
 @returns({"apiKeys": "array", "count": "integer"})
-@connection("dashboard")
-@timeout(15)
+@connection("none")
+@timeout(60)
 async def get_api_keys(*, store: bool = True, **params) -> dict:
     """List API keys from the Exa dashboard and optionally store the first enabled key.
 
-    The `id` field in the API response IS the full API key value (UUID format).
-    The dashboard UI masks it, but the API returns it in full.
-
-    If store=True (default), the first enabled key is stored via __secrets__
-    so exa.search works immediately after.
+    Runs in the dashboard tab — the request carries the live browser
+    session. The bearer secret is `legacyBearerSecret`; the stored key is
+    a *portable* secret, so it (alone) goes to the vault via __secrets__.
 
     Args:
         store: Store the first enabled key as a credential (default True)
     """
-    session = await _require_session()
+    session = await _check_session()
+    if not session:
+        return _needs_auth()
     email = session["user"]["email"]
 
-    resp = await client.get(f"{DASHBOARD_BASE}/api/get-api-keys")
-    data = resp["json"]
+    data = await _eval(_DASHBOARD, """
+if (!__onDashboard) return { __error: 'needs_auth' };
+const r = await fetch('/api/get-api-keys', { cache: 'no-store' });
+if (!r.ok) return { __error: 'http_' + r.status };
+return await r.json().catch(() => ({}));
+""")
+    if isinstance(data, dict) and data.get("__error") == "needs_auth":
+        return _needs_auth()
+    if not isinstance(data, dict) or data.get("__error"):
+        return app_error(
+            f"get-api-keys failed in the dashboard tab: "
+            f"{data.get('__error') if isinstance(data, dict) else data}",
+            code="DashboardError",
+        )
 
     keys = data.get("apiKeys", [])
     # The secret is `legacyBearerSecret`; `id` is the row UUID. Keys the
@@ -428,7 +350,7 @@ async def get_api_keys(*, store: bool = True, **params) -> dict:
             "value": {"key": secret},
             "metadata": {
                 "masked": {"key": secret[:6] + "••••••••"},
-                "dashboardUrl": f"{DASHBOARD_BASE}/api-keys",
+                "dashboardUrl": "https://dashboard.exa.ai/api-keys",
                 "keyName": key["name"],
             },
         }]
@@ -437,13 +359,25 @@ async def get_api_keys(*, store: bool = True, **params) -> dict:
 
 
 @returns({"teams": "array", "count": "integer"})
-@connection("dashboard")
-@timeout(15)
+@connection("none")
+@timeout(60)
 async def get_teams(**params) -> dict:
     """Get team info including rate limits, credits, and usage from the dashboard."""
-    await _require_session()
-    resp = await client.get(f"{DASHBOARD_BASE}/api/get-teams")
-    data = resp["json"]
+    data = await _eval(_DASHBOARD, """
+if (!__onDashboard) return { __error: 'needs_auth' };
+const r = await fetch('/api/get-teams', { cache: 'no-store' });
+if (r.status === 401 || r.status === 403) return { __error: 'needs_auth' };
+if (!r.ok) return { __error: 'http_' + r.status };
+return await r.json().catch(() => ({}));
+""")
+    if isinstance(data, dict) and data.get("__error") == "needs_auth":
+        return _needs_auth()
+    if not isinstance(data, dict) or data.get("__error"):
+        return app_error(
+            f"get-teams failed in the dashboard tab: "
+            f"{data.get('__error') if isinstance(data, dict) else data}",
+            code="DashboardError",
+        )
 
     teams = data.get("teams", [])
     return {
@@ -472,22 +406,37 @@ async def get_teams(**params) -> dict:
 
 
 @returns({"status": "string", "keyName": "string", "domain": "string", "maskedKey": "string"})
-@connection("dashboard")
-@timeout(15)
+@connection("none")
+@timeout(60)
 async def create_api_key(*, name: str = "agentOS", **params) -> dict:
     """Create a new API key on the Exa dashboard and store it via __secrets__.
 
     Args:
         name: Name for the new API key (default "agentOS")
     """
-    session = await _require_session()
+    session = await _check_session()
+    if not session:
+        return _needs_auth()
     email = session["user"]["email"]
 
-    resp = await client.post(
-        f"{DASHBOARD_BASE}/api/create-api-key",
-        json={"name": name},
-    )
-    data = resp["json"]
+    data = await _eval(_DASHBOARD, f"""
+if (!__onDashboard) return {{ __error: 'needs_auth' }};
+const r = await fetch('/api/create-api-key', {{
+  method: 'POST',
+  headers: {{ 'Content-Type': 'application/json' }},
+  body: JSON.stringify({{ name: {json.dumps(name)} }}),
+}});
+if (!r.ok) return {{ __error: 'http_' + r.status }};
+return await r.json().catch(() => ({{}}));
+""")
+    if isinstance(data, dict) and data.get("__error") == "needs_auth":
+        return _needs_auth()
+    if not isinstance(data, dict) or data.get("__error"):
+        return app_error(
+            f"create-api-key failed in the dashboard tab: "
+            f"{data.get('__error') if isinstance(data, dict) else data}",
+            code="DashboardError",
+        )
 
     key_obj = data.get("apiKey") or {}
     # The secret lives in `legacyBearerSecret`; `id` is the row UUID and
@@ -508,7 +457,7 @@ async def create_api_key(*, name: str = "agentOS", **params) -> dict:
             "value": {"key": api_key},
             "metadata": {
                 "masked": {"key": masked},
-                "dashboardUrl": f"{DASHBOARD_BASE}/api-keys",
+                "dashboardUrl": "https://dashboard.exa.ai/api-keys",
                 "keyName": name,
             },
         }],
@@ -594,25 +543,30 @@ async def read_webpage(*, url: str, **params) -> dict:
 
 @account.logout
 @returns({"status": "string", "hint": "string"})
-@connection("dashboard")
-@timeout(10)
+@connection("none")
+@timeout(60)
 async def logout(**params) -> dict:
     """Sign out of the Exa dashboard and invalidate the session.
 
-    Hits NextAuth's signout endpoint to invalidate the server-side
-    session — cookies ride the ambient per-call jar. Idempotent: signing
-    out a dead session is still a 200 at NextAuth.
+    Runs NextAuth's signout same-origin in the auth tab; the response's
+    Set-Cookie clears the session token from the browser profile.
+    Idempotent: signing out a dead session is still a 200 at NextAuth.
     """
-    csrf_token = await _get_csrf_token()
-    await client.post(
-        f"{AUTH_BASE}/api/auth/signout",
-        data={"csrfToken": csrf_token},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-
+    value = await _eval(_AUTH, """
+const csrf = await (await fetch('/api/auth/csrf')).json().catch(() => null);
+if (!csrf || !csrf.csrfToken) return { __error: 'csrf_failed' };
+const body = new URLSearchParams({ csrfToken: csrf.csrfToken, json: 'true' });
+const r = await fetch('/api/auth/signout', { method: 'POST', body });
+if (!r.ok) return { __error: 'http_' + r.status };
+return { ok: true };
+""")
+    if not isinstance(value, dict) or value.get("__error"):
+        return app_error(
+            f"Signout failed in the auth tab: "
+            f"{value.get('__error') if isinstance(value, dict) else value}",
+            code="LogoutFailed",
+        )
     return {
-        "__result__": {
-            "status": "logged_out",
-            "hint": "Dashboard session invalidated. Stored cookies should be cleared.",
-        }
+        "status": "logged_out",
+        "hint": "Session token cleared from the browser profile by NextAuth's own Set-Cookie.",
     }

@@ -55,129 +55,64 @@ run({ app: "exa", tool: "read_webpage", params: { url: "https://example.com" } }
 
 ## Auth
 
-Exa uses NextAuth.js with an email verification code flow. Signup and signin are the same endpoint — NextAuth creates the account if it doesn't exist.
+Two halves, two substrates:
 
-### Architecture
+- **API (`search`, `read_webpage`)** — a portable Exa **API key** on the
+  `api` connection, stored in the vault. `get_api_keys` / `create_api_key`
+  populate it from the dashboard. This is the only thing the vault holds
+  for Exa.
+- **Dashboard (account trio + key management)** — **browser-driven**. The
+  session is the engine-owned browser profile, not a vault row. Every
+  dashboard op is a same-origin `fetch()` evaluated *inside* the Exa tab
+  via the `browser_session` service; the `.exa.ai` session cookie rides
+  it automatically, so requests originate from the real browser and clear
+  Vercel's security checkpoint / Cloudflare by construction. The app
+  never sees the cookie.
 
-| Surface | Domain | Purpose |
-|---------|--------|---------|
-| Auth | `auth.exa.ai` | NextAuth.js — handles login, CSRF, email verification |
-| Dashboard | `dashboard.exa.ai` | API key management, billing, usage |
-| API | `api.exa.ai` | Search and content extraction (API key auth) |
+### Where the session lives
+
+`next-auth.session-token` on `.exa.ai`, written by NextAuth's own
+Set-Cookie into the profile at `~/.agentos/browsers/brave`. It survives
+engine and browser restarts because the profile does — log in once, stay
+logged in. There is no cookie credential row and no `__cookie_delta__`.
 
 ### Login flow (email verification code)
 
-```
-1. GET  auth.exa.ai/api/auth/csrf           → csrfToken + __Host-next-auth.csrf-token cookie
-2. POST auth.exa.ai/api/auth/signin/email   → { email, csrfToken, callbackUrl, json: "true" }
-                                               → Exa sends 6-digit code to the email address
-3. Retrieve code from email                  → Subject: "Sign in to Exa Dashboard"
-                                               Body: "Your verification code for Exa is: XXXXXX"
-4. GET  auth.exa.ai/api/auth/callback/email  → { token: CODE, email, callbackUrl }
-                                               → Sets next-auth.session-token cookie on .exa.ai
-5. GET  dashboard.exa.ai/api/auth/session    → Confirms session, returns user/team data
-```
+NextAuth.js, signin == signup. All three steps run inside the browser tab:
 
-### Session cookie
+1. `login(email)` — returns the `account` if the profile already holds a
+   live session; otherwise runs `fetch('/api/auth/csrf')` +
+   `POST /api/auth/signin/email` in the **auth.exa.ai** tab, triggering a
+   6-digit code email (subject "Sign in to Exa Dashboard"). Returns an
+   `auth_challenge{kind: code_sent}`.
+   Email resolves from `credentials.retrieve(domain=".exa.ai")` (any
+   `login_credentials` provider — 1Password, Keychain) when not passed.
+2. Agent reads the 6-digit code from any `email_lookup` provider (Gmail,
+   Mimestream).
+3. `verify_login_code(email, code)` — runs `POST /api/verify-otp` then
+   `GET /api/auth/callback/email` same-origin in the auth tab. The
+   callback's Set-Cookie lands the session in the profile directly;
+   confirmed by reading the session back from the dashboard tab.
 
-The session is a JWT stored in `next-auth.session-token` on `.exa.ai`:
-- HttpOnly, Secure, SameSite=Lax
-- ~30 day expiry
-- Cloudflare `cf_clearance` cookie also present (may require browser for initial acquisition)
+### Auth signal — the redirect IS the state
 
-### Dashboard API endpoints (cookie-authenticated)
+NextAuth bounces an unauthenticated dashboard visit to `auth.exa.ai`.
+`_eval` waits for the tab to settle on an `.exa.ai` origin, then exposes
+`__onDashboard` to the op body: on the dashboard → logged in; bounced to
+auth → logged out. No timeout, no cookie inspection.
 
-| Endpoint | Method | Returns |
-|----------|--------|---------|
-| `/api/auth/session` | GET | `{ user: { email, id, currentTeamId, hasCompletedNewAiOnboarding, teams }, expires }` |
-| `/api/get-api-keys` | GET | `{ apiKeys: [{ id, publicId, legacyBearerSecret, name, enabled, createdAt, rateLimit, … }] }` — the secret is **`legacyBearerSecret`**; `id` is the row UUID, `publicId` the display handle (neither authenticates) |
-| `/api/get-teams` | GET | `{ teams: [{ id, name, role, totalAppliedCreditsCents, usageLimit }] }` |
-| `/api/get-websets-billing` | GET | `{ hasAccess: bool }` |
-
-### Auth operations (agent-orchestrated, Playwright for code submission)
-
-The login is agent-orchestrated. HTTPX triggers the email, but the code submission requires Playwright because the auth page uses a native HTML form POST that HTTPX cannot replay (tested: both GET and POST to `/api/auth/callback/email` fail).
-
-```
-# Step 1: trigger the verification code email (HTTPX)
-run({ app: "exa", tool: "send_login_code", params: { email: "agentos@contini.co" } })
-# → { status: "code_sent", email, hint }
-
-# Step 2: agent checks email (any provider)
-# Look for subject "Sign in to Exa Dashboard", extract 6-digit code
-
-# Step 3: Playwright login (native form POST)
-run({ app: "playwright", tool: "get_webpage", params: { url: "https://dashboard.exa.ai", wait_until: "domcontentloaded" } })
-run({ app: "playwright", tool: "type", params: { selector: "input[type=email]", text: "agentos@contini.co" } })
-run({ app: "playwright", tool: "click", params: { selector: "button[type=submit]" } })
-# Wait for code entry page...
-run({ app: "playwright", tool: "type", params: { selector: "input[placeholder='Enter verification code']", text: "CODE" } })
-run({ app: "playwright", tool: "click", params: { selector: "button[type=submit]" } })
-
-# Step 4: extract cookies from browser
-run({ app: "playwright", tool: "cookies", params: { domain: ".exa.ai" } })
-# → find next-auth.session-token and cf_clearance
-
-# Step 5: store the session (HTTPX validates + stores via __secrets__)
-run({ app: "exa", tool: "store_session_cookies", params: {
-  email: "agentos@contini.co",
-  session_token: "eyJhbG...",
-  cf_clearance: "NIvx..."
-} })
-
-# Now dashboard operations work:
-run({ app: "exa", tool: "get_api_keys" })
-run({ app: "exa", tool: "get_teams" })
-run({ app: "exa", tool: "create_api_key", params: { name: "my-key" } })
-```
-
-### Playwright discovery notes
-
-Discovered 2026-03-21/22 via Playwright interactive sessions:
-
-- `fill` does NOT trigger React synthetic events on the login form — use `type` (real keystrokes) or the submit button stays disabled
-- The login page has a hidden honeypot field: `input[name="website"][type="text"]`
-- The verification code input: `input[placeholder='Enter verification code']` — maxLength 6, pattern `\d{6}`, no name/id attribute
-- After first login, Exa gates navigation to `/onboarding` when `hasCompletedNewAiOnboarding: false` — skip or complete before accessing `/api-keys`
-- The code submission is a **native HTML form POST** — fetch interceptor doesn't capture it, and HTTPX replay of `/api/auth/callback/email` fails with `?error=Verification` (GET) or `?error=configuration` (POST)
-- Navigate to `https://dashboard.exa.ai` (not `auth.exa.ai` directly) — the auth page rejects direct access with "accessed incorrectly"
-- Three auth providers available: `workos`, `google`, `email` (from `/api/auth/providers`)
-
-### Key discovery
-
-The bearer secret lives in the `legacyBearerSecret` field of
-`GET /api/get-api-keys` (Exa renamed away from the old scheme where
-`id` was itself the key). `id` is now the row UUID and `publicId`
-the display handle — neither authenticates. `get_api_keys` stores
-the first enabled key carrying a secret; keys served without one
-are listed `storable: false`. `create_api_key` reads the same field
-from the creation response.
-
-### Dashboard API endpoints
+### Dashboard endpoints (called same-origin from the tab)
 
 | Endpoint | Returns |
 |----------|---------|
-| `GET /api/auth/session` | User info, team memberships |
-| `GET /api/get-api-keys` | API keys — secret in `legacyBearerSecret` |
-| `GET /api/get-teams` | Rate limits, credits, usage, billing info |
-| `GET /api/service-api-keys?teamId=` | Service API keys (separate from regular keys) |
-| `GET /api/get-websets-billing` | Websets access flag |
+| `GET /api/auth/session` | user + team memberships (the session probe) |
+| `GET /api/get-api-keys` | keys — the bearer secret is **`legacyBearerSecret`**; `id` is the row UUID, `publicId` the display handle (neither authenticates) |
+| `GET /api/get-teams` | rate limits, credits, usage, billing |
+| `POST /api/create-api-key` | mints a key (secret in `legacyBearerSecret`) |
 
-### Open items
+The stored API key (a portable secret) is the only thing that leaves the
+browser for the vault.
 
-- `create_api_key`: exact POST endpoint not yet captured. Low priority since `get_api_keys` returns full key values.
-- Google SSO path: not yet reverse-engineered (email code flow works for now)
-- WorkOS SSO: available as a provider, not yet investigated
-
-### Next steps
-
-The current flow requires the agent to orchestrate Playwright for the code submission step (Option A). HTTPX can trigger the email and validate the session, but it cannot replay the native form POST. Future improvements:
-
-- **Session-scoped state (Option B):** Temporary auth state stored in the MCP/agent session — like browser cookies but for the agent. Python writes to session storage in step 1, reads it back in step 2, without the agent shuttling opaque tokens.
-- **`__needs__` continuation pattern:** Python yields a dependency declaration ("I need a verification code from email") and the engine fulfills it — pausing the operation, dispatching to the agent, and resuming when the dependency is met. This would collapse the multi-step flow into a single operation call.
-- **Playwright-as-fallback for auth:** Formalize the pattern where HTTPX handles the happy path (send email, validate session, call APIs) and Playwright handles steps that require native browser behavior (form POSTs, captchas, SSO). The agent decides when to use which.
-
-Both session state and `__needs__` are tracked on the engine roadmap under "Session-scoped state for auth flows."
 
 ## Known Limitations
 
