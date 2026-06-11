@@ -1,9 +1,9 @@
 """
 code_review.py — Evaluate code changes against project principles and architecture.
 
-Scores every diff against engine principles, shape principles,
-skill SDK patterns, and active refactoring specs. Uses llm.oneshot()
-for a single evaluation pass — no tools, no agent loop.
+Scores every diff against engine principles, design principles, and
+skill SDK patterns. Uses llm.oneshot() for a single evaluation pass —
+no tools, no agent loop.
 """
 
 import json
@@ -20,7 +20,7 @@ from agentos import llm, returns, shell, test, timeout
 # Absolute paths — skill may run from any cwd
 WORKSPACE_ROOT = Path.home() / "dev" / "agentos"
 CORE_ROOT = WORKSPACE_ROOT / "core"
-DOCS_ROOT = WORKSPACE_ROOT / "docs"
+DOCS_ROOT = WORKSPACE_ROOT / "platform" / "docs"
 
 
 def _load_principles() -> tuple[str, str, str]:
@@ -31,14 +31,16 @@ def _load_principles() -> tuple[str, str, str]:
     path run unreviewed for an unknown window.
     """
     engine_path = CORE_ROOT / "principles.md"
-    sdk_path = DOCS_ROOT / "src" / "content" / "docs" / "principles.md"
-    guide_path = DOCS_ROOT / "src" / "content" / "docs" / "skills.md"
+    design_path = (
+        DOCS_ROOT / "src" / "content" / "docs" / "architecture" / "design-principles.md"
+    )
+    guide_path = DOCS_ROOT / "src" / "content" / "docs" / "skills" / "overview.md"
 
     missing = [
         f"{name} ({p})"
         for name, p in [
             ("engine principles", engine_path),
-            ("sdk principles", sdk_path),
+            ("design principles", design_path),
             ("skills guide", guide_path),
         ]
         if not p.is_file()
@@ -47,19 +49,7 @@ def _load_principles() -> tuple[str, str, str]:
         raise FileNotFoundError(
             "code-review: missing knowledge sources:\n  " + "\n  ".join(missing)
         )
-    return engine_path.read_text(), sdk_path.read_text(), guide_path.read_text()
-
-
-def _load_refactoring_specs() -> str:
-    specs_dir = CORE_ROOT / "docs" / "specs" / "refactoring"
-    if not specs_dir.exists():
-        return ""
-    parts = []
-    for f in sorted(specs_dir.glob("*.md")):
-        if f.name == "README.md":
-            continue
-        parts.append(f"## {f.stem}\n{f.read_text()}")
-    return "\n\n".join(parts)
+    return engine_path.read_text(), design_path.read_text(), guide_path.read_text()
 
 
 async def _load_arch() -> str:
@@ -109,15 +99,12 @@ A markdown list. For each violation:
 - **CRITICAL/MAJOR/MINOR** [`principle name`] `file/path`: What's wrong
 
 Severity guide:
-- CRITICAL: Entity-specific code in Rust, building on a module flagged for refactoring,
-  hardcoded provider/service names in generic code, forcing structured JSON output on LLMs,
-  making LLMs do arithmetic/scoring, over-constraining agent output formats
-- MAJOR: Rendering logic in wrong module, missing delegation pattern, new code in a file
-  the refactoring specs say should shrink, not giving agents feedback channels or prior work context
+- CRITICAL: Entity-specific code in Rust, hardcoded provider/service names in generic
+  code, forcing structured JSON output on LLMs, making LLMs do arithmetic/scoring,
+  over-constraining agent output formats
+- MAJOR: Rendering logic in wrong module, missing delegation pattern, not giving agents
+  feedback channels or prior work context
 - MINOR: Naming inconsistencies, unnecessary complexity, missing campsite-rule improvements
-
-If the diff touches a file that an active refactoring spec says should shrink or be
-decomposed, and the diff ADDS lines to that file, that is at minimum a MAJOR violation.
 
 If the diff touches code that agents interact with (skills, prompts, SDK, tools),
 also evaluate against the Agent Ergonomics Principles provided below.
@@ -145,7 +132,7 @@ async def evaluate_commit(
     model: str = "sonnet",
     **params,
 ) -> dict:
-    """Evaluate a git diff against project principles and refactoring specs.
+    """Evaluate a git diff against project principles.
 
     Args:
         diff: The staged git diff to evaluate
@@ -153,8 +140,7 @@ async def evaluate_commit(
         threshold: Minimum passing score out of 100 (default 90)
         model: LLM model to use for evaluation (default sonnet)
     """
-    engine_principles, sdk_principles, skill_guide = _load_principles()
-    refactoring_specs = _load_refactoring_specs()
+    engine_principles, design_principles, skill_guide = _load_principles()
     arch = await _load_arch()
 
     prompt_parts = [
@@ -164,16 +150,10 @@ async def evaluate_commit(
 
     if engine_principles:
         prompt_parts += ["## Engine & Agent Ergonomics Principles", engine_principles, ""]
-    if sdk_principles:
-        prompt_parts += ["## Shape Principles", sdk_principles, ""]
+    if design_principles:
+        prompt_parts += ["## Design Principles", design_principles, ""]
     if skill_guide:
         prompt_parts += ["## Skill SDK Guide", skill_guide, ""]
-    if refactoring_specs:
-        prompt_parts += [
-            "## Active Refactoring Specs (code should not build on patterns these specs plan to fix)",
-            refactoring_specs,
-            "",
-        ]
     if arch:
         prompt_parts += ["## Architecture (crate sizes, dependency chain, largest files)", arch, ""]
 
