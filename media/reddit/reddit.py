@@ -3,7 +3,7 @@
 import re
 from datetime import datetime, timezone
 
-from agentos import provides, returns, test, web_read, web_search, client
+from agentos import provides, returns, test, web_read, client
 
 
 def _ts(epoch: int | float | None) -> str | None:
@@ -75,7 +75,6 @@ async def _get_json(path: str, params: dict | None = None) -> dict:
 
 
 @returns("post[]")
-@provides(web_search)
 async def search_posts(query: str, limit: int = 25, sort: str = "relevance", **params) -> list[dict]:
     """Search posts across Reddit
 

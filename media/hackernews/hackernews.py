@@ -1,6 +1,6 @@
 """Hacker News — public Algolia API, no auth required."""
 
-from agentos import provides, returns, test, web_read, web_search, client
+from agentos import provides, returns, test, web_read, client
 
 BASE = "https://hn.algolia.com/api/v1"
 SITE = "https://news.ycombinator.com"
@@ -104,7 +104,6 @@ async def list_posts(feed: str = "front", limit: int = 30, **params) -> list[dic
 
 
 @returns("post[]")
-@provides(web_search)
 async def search_posts(query: str, limit: int = 30, **params) -> list[dict]:
     """Search Hacker News stories.
 
