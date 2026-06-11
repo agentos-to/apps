@@ -179,10 +179,16 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
         pass
     os.makedirs(_AGENTOS_PROFILE, exist_ok=True)
 
+    # Headless session host: `--headless=new` is the real browser without
+    # a window (≥112 reports a plain `Chrome/` UA, so a windowed-linked
+    # profile survives the flip). `open -na` detaches via LaunchServices
+    # and honors `--headless=new`.
     launched = await shell.run("open", args=[
         "-na", "Google Chrome", "--args",
         f"--user-data-dir={_AGENTOS_PROFILE}",
         "--remote-debugging-port=0",
+        "--headless=new",
+        "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
     ])

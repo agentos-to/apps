@@ -180,10 +180,18 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
         pass
     os.makedirs(_AGENTOS_PROFILE, exist_ok=True)
 
+    # Headless session host: the engine-owned instance has no UI — it
+    # exists only to hold sessions and run CDP. `--headless=new` is the
+    # real browser without a window (≥112 reports a plain `Chrome/` UA,
+    # so a profile linked while windowed survives the flip). `open -na`
+    # detaches via LaunchServices and honors `--headless=new` (verified:
+    # the process runs headless and writes DevToolsActivePort).
     launched = await shell.run("open", args=[
         "-na", "Brave Browser", "--args",
         f"--user-data-dir={_AGENTOS_PROFILE}",
         "--remote-debugging-port=0",
+        "--headless=new",
+        "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
     ])
