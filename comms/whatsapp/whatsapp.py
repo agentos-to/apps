@@ -331,8 +331,10 @@ async def list_persons(*, conversation_id=None, limit=200, **params):
         const chat = findChat({json.dumps(conversation_id)});
         if (!chat) return {{ __error: 'not_found', what: 'conversation', ref: {json.dumps(conversation_id)} }};
         // Participants are lazy-loaded — opening the chat populates them.
-        const openCmd = window.require('WAWebCmd');
-        try {{ await openCmd.openChatAt(chat); }} catch (e) {{}}
+        // (WAWebCmd exports the Cmd singleton since ~mid-2026; openChatAt
+        // is a method on it, no longer a top-level export.)
+        const {{ Cmd }} = window.require('WAWebCmd');
+        try {{ await Cmd.openChatAt(chat); }} catch (e) {{}}
         for (let i = 0; i < 10; i++) {{
           if (chat.__x_groupMetadata?.participants?.getModelsArray?.()?.length) break;
           await new Promise(r => setTimeout(r, 500));
@@ -397,6 +399,63 @@ async def send_message(*, to, text, **params):
       conversationName: chatName(chat),
     }};
     """)
+
+
+# Live hook: self-installing, idempotent, waits for the Store on its
+# own (it also runs on future page loads, where nothing is ready yet).
+# Emits one shape-native entity per new message; the engine routes
+# marker-tagged console lines through the extraction pipeline.
+_WATCH_MARKER = "__agentos_entity__"
+
+_WATCH_HOOK = """
+(function () {
+  if (window.__agentos_wa_watch__) return;
+  window.__agentos_wa_watch__ = true;
+  const install = setInterval(() => {
+    try {
+      const C = window.require('WAWebCollections');
+      const me = window.require('WAWebUserPrefsMeUser').getMeUser();
+      if (!C || !C.Chat || !me) return;
+      clearInterval(install);
+      const { Chat, Msg, Contact } = C;
+      %(helpers)s
+      Msg.on('add', (m) => {
+        try {
+          if (!m.__x_isNewMsg) return;
+          const entity = mapMsg(m);
+          entity.__shape__ = 'message';
+          console.log(%(marker)s + JSON.stringify(entity));
+        } catch (e) {}
+      });
+    } catch (e) {}
+  }, 500);
+})()
+"""
+
+
+@returns({"watching": "boolean", "stream": "string"})
+@timeout(60)
+async def watch(**params):
+    """Stream new WhatsApp messages into the graph in real time.
+
+    Installs a hook on the live session (persists across page reloads);
+    each incoming or outgoing message lands in the graph as a `message`
+    entity the moment WhatsApp receives it — observers (SSE) fire as
+    with any other graph write. Idempotent: safe to call repeatedly.
+    Stops when the browser session ends (call again after an engine or
+    browser restart).
+    """
+    hook = _WATCH_HOOK % {
+        "helpers": _HELPERS,
+        "marker": json.dumps(_WATCH_MARKER),
+    }
+    await capability.call("browser_session", verb="subscribe", params={
+        "target": _TARGET,
+        "js": hook,
+        "marker": _WATCH_MARKER,
+        "subscriber": "whatsapp",
+    })
+    return {"watching": True, "stream": "message"}
 
 
 @returns({"status": "string", "reactedTo": "string", "conversationName": "string"})
