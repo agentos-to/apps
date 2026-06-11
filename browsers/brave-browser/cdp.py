@@ -25,7 +25,6 @@ so the instance survives the app call.
 """
 
 import asyncio
-import json
 import os
 from typing import Any
 
@@ -144,25 +143,25 @@ async def _fetch_targets(port: int) -> list[dict[str, Any]]:
 # Launch mode — the engine-owned instance
 # ──────────────────────────────────────────────────────────────────────
 
-async def _ensure_agentos_instance() -> int | dict[str, Any]:
-    """Return the debug port of the engine-owned Brave, launching it
-    if needed. Returns the port on success, a `app_error` dict on
-    failure.
+def _de_headless(user_agent: str) -> str:
+    """`HeadlessChrome/149.0.0.0` → `Chrome/149.0.0.0`. Every other byte
+    of the UA already matches the windowed browser — the product token
+    is the lone headless tell (Sec-CH-UA brands and navigator.webdriver
+    are clean under `--headless=new`)."""
+    return user_agent.replace("HeadlessChrome/", "Chrome/")
 
-    Reuse before launch: if the profile's DevToolsActivePort names a
-    port that answers /json/version, that's our instance — `open -na`
-    with the same user-data-dir would only flash a new window at it.
+
+async def _launch_and_wait(user_agent: str | None) -> int | dict[str, Any]:
+    """Kill whatever holds the AgentOS profile, launch fresh, and return
+    the debug port once /json/version answers — or an `app_error` dict.
+
+    The kill must *wait for actual exit*: a frozen or half-dead
+    instance would shadow `open -na` — until its SingletonLock is
+    released, a new process with the same user-data-dir defers to it
+    and exits without ever rewriting DevToolsActivePort. SIGTERM first
+    (clean profile shutdown), SIGKILL if it lingers. pkill/pgrep exit 1
+    on no match.
     """
-    candidate = _read_devtools_active_port(_AGENTOS_PORT_FILE)
-    if candidate is not None and await _fetch_version(candidate) is not None:
-        return candidate
-
-    # No (responsive) instance. A frozen or half-dead one would shadow
-    # `open -na`: until its SingletonLock is released, a new process
-    # with the same user-data-dir defers to it and exits without ever
-    # rewriting DevToolsActivePort. Kill and *wait for actual exit*
-    # before launching — SIGTERM first (clean profile shutdown),
-    # SIGKILL if it lingers. pkill/pgrep exit 1 on no match.
     pattern = f"user-data-dir={_AGENTOS_PROFILE}"
     await shell.run("pkill", args=["-f", pattern])
     for attempt in range(10):
@@ -182,11 +181,15 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
 
     # Headless session host: the engine-owned instance has no UI — it
     # exists only to hold sessions and run CDP. `--headless=new` is the
-    # real browser without a window (≥112 reports a plain `Chrome/` UA,
-    # so a profile linked while windowed survives the flip). `open -na`
-    # detaches via LaunchServices and honors `--headless=new` (verified:
-    # the process runs headless and writes DevToolsActivePort).
-    launched = await shell.run("open", args=[
+    # real browser without a window, but it advertises itself: the UA's
+    # product token reads `HeadlessChrome/…`, a bot-detection magnet.
+    # `--user-agent=` pins the windowed identity process-wide — every
+    # tab, every navigation. The caller derives it from the running
+    # binary (a literal would drift the moment Brave auto-updates, and
+    # a UA/Sec-CH-UA version mismatch fingerprints worse than honest
+    # headless). `open -na` detaches via LaunchServices and honors the
+    # flags.
+    args = [
         "-na", "Brave Browser", "--args",
         f"--user-data-dir={_AGENTOS_PROFILE}",
         "--remote-debugging-port=0",
@@ -194,7 +197,16 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
-    ])
+    ]
+    if user_agent is not None:
+        # One unit: a UA override alone makes Chromium send *blank*
+        # Sec-CH-UA headers (the UACHOverrideBlank feature) — an
+        # automation tell as loud as the Headless token. Disabling it
+        # keeps the brands computed from the real browser, byte-equal
+        # to the windowed instance's.
+        args.append(f"--user-agent={user_agent}")
+        args.append("--disable-features=UACHOverrideBlank")
+    launched = await shell.run("open", args=args)
     if launched.get("exit_code", 1) != 0:
         return app_error(
             "Failed to launch Brave via `open -na`. Is Brave Browser "
@@ -218,6 +230,41 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
         code="LaunchFailed",
         profile=_AGENTOS_PROFILE,
     )
+
+
+async def _ensure_agentos_instance() -> int | dict[str, Any]:
+    """Return the debug port of the engine-owned Brave, launching it
+    if needed. Returns the port on success, a `app_error` dict on
+    failure.
+
+    Reuse before launch: if the profile's DevToolsActivePort names a
+    port that answers /json/version *and* its UA carries no `Headless`
+    tell, that's our instance — `open -na` with the same user-data-dir
+    would only flash a new window at it. Anything else (re)launches
+    with a pinned de-headlessed UA derived from the binary itself: a
+    responsive-but-headless instance already reports the exact UA to
+    strip; a cold profile launches once unpinned to ask, then
+    relaunches pinned. The double launch happens only on that first
+    cold start.
+    """
+    candidate = _read_devtools_active_port(_AGENTOS_PORT_FILE)
+    version = (
+        await _fetch_version(candidate) if candidate is not None else None
+    )
+    ua = (version or {}).get("User-Agent", "")
+    if version is not None and "Headless" not in ua:
+        return candidate
+
+    pinned = _de_headless(ua) if ua else None
+    port = await _launch_and_wait(pinned)
+    if isinstance(port, dict) or pinned is not None:
+        return port
+
+    version = await _fetch_version(port)
+    ua = (version or {}).get("User-Agent", "")
+    if "Headless" not in ua:
+        return port
+    return await _launch_and_wait(_de_headless(ua))
 
 
 # ──────────────────────────────────────────────────────────────────────
