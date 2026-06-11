@@ -26,6 +26,12 @@ connection(
     base_url='https://mail.google.com',
     domain='mail.google.com',
     client='fetch',
+    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
+    # (browser-session-store). This no longer resolves; authed ops fail with
+    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
+    # mail.google.com tab via services.call(browser_session) and bind ops to
+    # @connection("none"). Template: apps/web/exa/exa.py. (Gmail's oauth path
+    # is unaffected — this is only the cookie 'sync' connection.)
     auth={'type': 'cookies', 'domain': '.google.com', 'names': ['SID', 'HSID', 'SSID', 'OSID', '__Secure-1PSID', '__Secure-3PSID']})
 
 

@@ -2056,6 +2056,11 @@ connection(
     base_url='https://riders.uber.com',
     domain='uber.com',
     client='fetch',
+    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
+    # (browser-session-store). This no longer resolves; authed ops fail with
+    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
+    # riders.uber.com tab via services.call(browser_session) and bind ops to
+    # @connection("none"). Template: apps/web/exa/exa.py.
     auth={'type': 'cookies', 'domain': '.uber.com', 'account': {'check': 'check_session'}},
     label='Uber Rider',
     help_url='https://riders.uber.com')
@@ -2066,6 +2071,11 @@ connection(
     base_url='https://www.ubereats.com',
     domain='ubereats.com',
     client='fetch',
+    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
+    # (browser-session-store). This no longer resolves; authed ops fail with
+    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
+    # ubereats.com tab via services.call(browser_session) and bind ops to
+    # @connection("none"). Template: apps/web/exa/exa.py.
     auth={'type': 'cookies', 'domain': '.ubereats.com', 'account': {'check': 'check_eats_session'}},
     label='Uber Eats',
     help_url='https://www.ubereats.com')

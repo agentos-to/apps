@@ -40,6 +40,12 @@ connection(
     description="united.com session — flights, reservations, MileagePlus",
     base_url="https://www.united.com",
     client="browser",
+    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
+    # (browser-session-store). This no longer resolves; authed ops fail with
+    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
+    # united.com tab via services.call(browser_session) and bind ops to
+    # @connection("none"). Template: apps/web/exa/exa.py. (United is anti-bot
+    # hardened — expect real reverse-engineering, not just a transport swap.)
     auth={"type": "cookies", "domain": ".united.com",
           "account": {"check": "check_session"}},
     label="United Session",

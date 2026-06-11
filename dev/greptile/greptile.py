@@ -28,6 +28,11 @@ connection(
     base_url='https://app.greptile.com',
     domain='app.greptile.com',
     client='fetch',
+    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
+    # (browser-session-store). This no longer resolves; authed ops fail with
+    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
+    # app.greptile.com tab via services.call(browser_session) and bind ops to
+    # @connection("none"). Template: apps/web/exa/exa.py.
     auth={'type': 'cookies', 'domain': 'app.greptile.com', 'names': ['__Secure-authjs.session-token'], 'account': {'check': 'check_session'}},
     label='Dashboard session',
     help_url='https://app.greptile.com/settings/organization/people')
