@@ -6,13 +6,16 @@
 
 ## Current State: Our WhatsApp Adapter
 
-Our existing adapter reads the **macOS desktop app's live SQLite database** at:
+The live adapter (`whatsapp.py`) runs entirely on **WhatsApp Web** in
+the engine-owned Brave instance — reads, sends, reactions, read
+receipts, durable live watch, and decrypted media hydration, all via
+the `browser_session` capability. The macOS desktop app and its
+`ChatStorage.sqlite` are NOT used and need not be installed.
 
-```
-~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite
-```
-
-This gives real-time access to conversations, messages, contacts, and groups — but only while WhatsApp Desktop is installed and logged in. A backup adapter would complement this by allowing import of historical data from phone backups.
+What Web cannot reach is *deep history*: WhatsApp Web only syncs
+recent messages per chat. A backup-import adapter built from the
+research below would cover historical data from phone backups — that
+adapter does not exist yet; this document is its starting point.
 
 ---
 
