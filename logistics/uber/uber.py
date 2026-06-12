@@ -395,19 +395,25 @@ _UBER_EATS = {"shape": "product", "url": "https://ubereats.com", "name": "Uber E
 
 def _rides_needs_auth():
     return app_error(
-        "No live Uber rider session in the AgentOS browser profile. Sign in "
-        "once headed at riders.uber.com in the AgentOS browser — Uber's login "
-        "(phone/email OTP + anti-bot) is best cleared by a human, after which "
-        "the session lives in the profile and these ops just work.",
+        "No live Uber rider session in the AgentOS browser profile. Uber's "
+        "login (phone/email OTP + anti-bot) is best cleared by a human. Open "
+        "the headed sign-in window for them: call the `login_window` service "
+        "with url=https://riders.uber.com, poll check_session until "
+        "authenticated, then login_window(close=true). The session lands in "
+        "the profile and these ops just work.",
         code="NeedsAuth",
+        login_url="https://riders.uber.com",
     )
 
 
 def _eats_needs_auth():
     return app_error(
-        "No live Uber Eats session in the AgentOS browser profile. Sign in "
-        "once headed at ubereats.com in the AgentOS browser.",
+        "No live Uber Eats session in the AgentOS browser profile. Open the "
+        "headed sign-in window for the human: call the `login_window` "
+        "service with url=https://www.ubereats.com, poll check_session "
+        "until authenticated, then login_window(close=true).",
         code="NeedsAuth",
+        login_url="https://www.ubereats.com",
     )
 
 

@@ -544,12 +544,15 @@ async def login(**params) -> dict:
     if acct:
         return {**acct, "authenticated": True}
     return app_error(
-        "No live United session in the AgentOS browser profile. Sign in once "
-        "headed at https://www.united.com/en/us/account/sign-in in the AgentOS "
-        "browser — United's login (username + password + MFA behind Akamai "
-        "bot-manager) is best cleared by a human, after which the session lives "
-        "in the profile and these ops just work.",
+        "No live United session in the AgentOS browser profile. United's "
+        "login (username + password + MFA behind Akamai bot-manager) is best "
+        "cleared by a human. Open the headed sign-in window for them: call "
+        "the `login_window` service with "
+        "url=https://www.united.com/en/us/account/sign-in, poll "
+        "check_session until authenticated, then login_window(close=true). "
+        "The session lands in the profile and these ops just work.",
         code="NeedsAuth",
+        login_url="https://www.united.com/en/us/account/sign-in",
     )
 
 

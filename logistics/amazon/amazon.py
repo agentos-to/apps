@@ -1549,12 +1549,15 @@ async def _account_identity() -> dict[str, Any] | None:
 
 def _needs_auth():
     return app_error(
-        "No live Amazon session in the AgentOS browser profile. Sign in once "
-        "headed at amazon.com in the AgentOS browser — Amazon's login (email + "
-        "password + frequent OTP/CAPTCHA, fronted by Lightsaber anti-bot) is "
-        "best cleared by a human, after which the session lives in the profile "
-        "and these account ops just work.",
+        "No live Amazon session in the AgentOS browser profile. Amazon's "
+        "login (email + password + frequent OTP/CAPTCHA, fronted by "
+        "Lightsaber anti-bot) is best cleared by a human. Open the headed "
+        "sign-in window for them: call the `login_window` service with "
+        "url=https://www.amazon.com/gp/sign-in.html, poll check_session "
+        "until authenticated, then login_window(close=true). The session "
+        "lands in the profile and these account ops just work.",
         code="NeedsAuth",
+        login_url="https://www.amazon.com/gp/sign-in.html",
     )
 
 

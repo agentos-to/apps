@@ -109,8 +109,12 @@ def _needs_auth():
     return app_error(
         "No live Greptile dashboard session in the AgentOS browser profile. "
         "Run greptile.login — it drives the email+password sign-in form at "
-        "auth.greptile.com with vault credentials.",
+        "auth.greptile.com with vault credentials. OAuth-only accounts "
+        "(GitHub/GitLab/Google SSO) need a human: call the `login_window` "
+        "service with url=https://auth.greptile.com, poll check_session "
+        "until authenticated, then login_window(close=true).",
         code="NeedsAuth",
+        login_url="https://auth.greptile.com",
     )
 
 
@@ -409,8 +413,9 @@ async def login(*, email: str = "", password: str = "", **params) -> dict:
             code="NeedsCredentials",
             required=["email", "password"],
             hint="Pass email+password, store a greptile.com item in a "
-                 "login_credentials provider, or (OAuth-only account) sign "
-                 "in once headed in the AgentOS browser.",
+                 "login_credentials provider, or (OAuth-only account) open "
+                 "the headed AgentOS sign-in window via the `login_window` "
+                 "service (url=https://auth.greptile.com).",
         )
     email = normalize_email(email)
 

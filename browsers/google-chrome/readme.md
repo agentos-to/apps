@@ -46,7 +46,21 @@ OPERATION       DESCRIPTION
 -----------     -------------------------------------------------------
 cdp_connect     Return {ws_url, target_id, browser_version, tabs} for a
                 debug-attachable Chrome (mode: attach | launch)
+login_window    Headed app-mode sign-in window on the AgentOS profile
+                ({url, label?} opens, {close: true} → back to headless)
 ```
 
 Consumers should almost never call this directly — ask for the
 `browser_session` service instead and let the engine hold the socket.
+
+## Headed login (`login_window`)
+
+When a login needs a human (SSO, MFA, CAPTCHA), `login_window(url,
+label?)` swaps the engine-owned profile — named **"AgentOS"** — from
+headless to a headed Chromium app-mode window (`--app=<url>`). The
+human signs in, the agent polls the target app's `check_session`, then
+`login_window(close=true)` swaps back to headless. One profile, two
+modes; the session persists on disk across every swap — no cookie
+copying. Agents reach it through the `login_window` *service*
+(provided by the OS browser app), which resolves `cdp_access` once so
+the window always opens on the session host's exact profile.

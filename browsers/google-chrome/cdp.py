@@ -8,6 +8,11 @@ there. This module knows Chrome-specific things (profile paths,
 DevToolsActivePort, launch flags, debug port); it knows nothing
 about what callers do with the session.
 
+Also implements the `login_window` service: the engine-owned profile
+surfaced *headed*, in Chromium app-mode, for the one moment a human
+must act — a login the agent can't do autonomously. One profile, two
+modes; see `login_window` below.
+
 Matchmaking picks the provider: any Chromium-family browser app can
 provide `cdp_access` (Brave ships the same shape), the user's default
 app for the service wins, and consumers never name a browser. Zero
@@ -24,7 +29,9 @@ so the instance survives the app call.
 """
 
 import asyncio
+import json
 import os
+import shutil
 from typing import Any
 
 from agentos import (
@@ -150,9 +157,48 @@ def _de_headless(user_agent: str) -> str:
     return user_agent.replace("HeadlessChrome/", "Chrome/")
 
 
-async def _launch_and_wait(user_agent: str | None) -> int | dict[str, Any]:
+def _brand_profile() -> None:
+    """Name the Chromium profile "AgentOS" in the user-data-dir's
+    Local State, so any headed surface (the app-mode login window,
+    a stray profile picker) is unmistakably the agent's instance and
+    never confused with the human's own Chrome. Chromium persists the
+    name itself once set; this just seeds/repairs it. Only safe while
+    the instance is down — callers patch between kill and relaunch.
+    """
+    local_state_path = os.path.join(_AGENTOS_PROFILE, "Local State")
+    try:
+        with open(local_state_path, "r") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    default = (
+        state.setdefault("profile", {})
+        .setdefault("info_cache", {})
+        .setdefault("Default", {})
+    )
+    if default.get("name") == "AgentOS":
+        return
+    default["name"] = "AgentOS"
+    try:
+        with open(local_state_path, "w") as f:
+            json.dump(state, f)
+    except OSError:
+        pass  # cosmetic — never block a launch on it
+
+
+async def _launch_and_wait(
+    user_agent: str | None,
+    app_url: str | None = None,
+) -> int | dict[str, Any]:
     """Kill whatever holds the AgentOS profile, launch fresh, and return
     the debug port once /json/version answers — or an `app_error` dict.
+
+    Two modes, one profile. Default is the headless session host
+    (`--headless=new`). With `app_url` set, the *same* user-data-dir
+    launches headed in Chromium app-mode (`--app=<url>`) — a chromeless
+    single-page window for a human sign-in. The session lives on disk
+    in the profile, so it survives every headless↔headed swap with no
+    cookie copying.
 
     The kill must *wait for actual exit*: a frozen or half-dead
     instance would shadow `open -na` — until its SingletonLock is
@@ -163,11 +209,17 @@ async def _launch_and_wait(user_agent: str | None) -> int | dict[str, Any]:
     """
     pattern = f"user-data-dir={_AGENTOS_PROFILE}"
     await shell.run("pkill", args=["-f", pattern])
-    for attempt in range(10):
+    # Chromium commits the cookie SQLite DB on a ~30s timer; a graceful
+    # SIGTERM shutdown flushes the pending batch. SIGKILL mid-flush
+    # loses every cookie set in the last seconds — for the login-window
+    # swap that's the human's fresh session, the one thing this profile
+    # exists to hold. So the escalation is patient: SIGKILL only after
+    # 8s of SIGTERM not sticking.
+    for attempt in range(30):
         alive = await shell.run("pgrep", args=["-f", pattern])
         if alive.get("exit_code") != 0:
             break
-        if attempt == 5:
+        if attempt == 16:
             await shell.run("pkill", args=["-9", "-f", pattern])
         await asyncio.sleep(0.5)
     # Remove the stale port file so the poll below only ever reads the
@@ -177,6 +229,17 @@ async def _launch_and_wait(user_agent: str | None) -> int | dict[str, Any]:
     except OSError:
         pass
     os.makedirs(_AGENTOS_PROFILE, exist_ok=True)
+    _brand_profile()
+    # The session host boots tabless, always. Tabs are derived state —
+    # subscriptions and sessions re-create what they need — but session
+    # restore replays them on every swap (and replays a killed
+    # instance's as a crash restore), stacking duplicate app tabs until
+    # single-session sites like WhatsApp demand "use here". Cookies are
+    # the only durable thing in this profile.
+    shutil.rmtree(
+        os.path.join(_AGENTOS_PROFILE, "Default", "Sessions"),
+        ignore_errors=True,
+    )
 
     # Headless session host: the engine-owned instance has no UI — it
     # exists only to hold sessions and run CDP. `--headless=new` is the
@@ -188,15 +251,34 @@ async def _launch_and_wait(user_agent: str | None) -> int | dict[str, Any]:
     # a UA/Sec-CH-UA version mismatch fingerprints worse than honest
     # headless). `open -na` detaches via LaunchServices and honors the
     # flags.
+    #
+    # Headed app-mode (`app_url`): same flags minus `--headless=new`,
+    # plus `--app=<url>` — Chromium renders one chromeless window, no
+    # tabs, no URL bar, reading as a native sign-in panel. A headed
+    # window's UA is naturally clean, so no pin is needed there.
     args = [
         "-na", "Google Chrome", "--args",
         f"--user-data-dir={_AGENTOS_PROFILE}",
         "--remote-debugging-port=0",
-        "--headless=new",
-        "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    # Even with Sessions/ gone, a hard-killed previous instance leaves
+    # the "didn't shut down correctly" bubble armed — suppress it.
+    args.append("--hide-crash-restore-bubble")
+    if app_url is not None:
+        # No size flag: Chromium's remembered app-window placement
+        # overrides --window-size. The engine's login_window provider
+        # sets sign-in-panel bounds over CDP (Browser.setWindowBounds)
+        # right after launch instead.
+        args.append(f"--app={app_url}")
+    else:
+        # Headless-only: the anti-fingerprint flag for agent-driven ops.
+        # Headed it does nothing useful (no automation, webdriver is
+        # already false) and Chromium shames it with a yellow
+        # "unsupported flag" infobar across the human's sign-in window.
+        args.append("--headless=new")
+        args.append("--disable-blink-features=AutomationControlled")
     if user_agent is not None:
         # One unit: a UA override alone makes Chromium send *blank*
         # Sec-CH-UA headers (the UACHOverrideBlank feature) — an
@@ -253,8 +335,19 @@ async def _ensure_agentos_instance() -> int | dict[str, Any]:
     ua = (version or {}).get("User-Agent", "")
     if version is not None and "Headless" not in ua:
         return candidate
+    return await _relaunch_headless(ua)
 
-    pinned = _de_headless(ua) if ua else None
+
+async def _relaunch_headless(known_ua: str = "") -> int | dict[str, Any]:
+    """(Re)launch the headless session host with a pinned clean UA.
+
+    `known_ua` is whatever UA the previous instance reported (headed:
+    already clean; headless: carries the `HeadlessChrome/` token to
+    strip; cold profile: empty). With no known UA we launch once
+    unpinned to ask the binary itself, then relaunch pinned — the
+    double launch happens only on that first cold start.
+    """
+    pinned = _de_headless(known_ua) if known_ua else None
     port = await _launch_and_wait(pinned)
     if isinstance(port, dict) or pinned is not None:
         return port
@@ -392,4 +485,91 @@ async def cdp_connect(
         "browser_version": browser_version,
         "attached_to": f"{owner} on port {resolved_port}",
         "tabs": tabs,
+    }
+
+
+@returns({
+    "status": "string",
+    "url": "string",
+    "port": "number",
+    "hint": "string",
+})
+# No @provides on purpose: `login_window` is the fixed-name sibling
+# verb of `cdp_access` (the volume_transport pattern). The engine's
+# browser system app provides the `login_window` *service*, resolves
+# `cdp_access` once — honoring the human's defaults_to pick — and
+# dispatches this tool on that same provider, so the headed window can
+# never open on a different profile than the headless session host.
+@connection("cdp")
+@timeout(60)
+async def login_window(
+    *,
+    url: str | None = None,
+    label: str | None = None,
+    close: bool = False,
+    **params,
+) -> dict[str, Any]:
+    """Open (or close) a headed sign-in window on the AgentOS profile.
+
+    For logins the agent can't complete autonomously — OAuth/SSO, MFA,
+    CAPTCHA — this swaps the headless engine-owned instance for a
+    headed Chromium app-mode window (`--app=<url>`): one chromeless
+    page on the *same* profile, so the human's sign-in lands directly
+    in the session every browser-driven op already drives.
+
+    The flow:
+        1. an app's `login` returns NeedsAuth
+        2. `login_window(url=<the platform's sign-in page>, label=...)`
+        3. the human signs in inside the window
+        4. poll that app's `check_session` until authenticated —
+           polling is safe; ops reuse the headed instance while it's up
+        5. `login_window(close=True)` — back to headless; the session
+           persists on disk
+
+    Args:
+        url: the sign-in page to frame (required unless `close`).
+        label: human-readable platform name, echoed in the response.
+        close: kill the headed window and relaunch the headless
+            session host on the same profile.
+
+    Returns `{status, url?, port, hint}`; `app_error` envelopes on
+    launch failure (LaunchFailed) or a missing `url` (MissingUrl).
+    """
+    if close:
+        candidate = _read_devtools_active_port(_AGENTOS_PORT_FILE)
+        version = (
+            await _fetch_version(candidate) if candidate is not None else None
+        )
+        ua = (version or {}).get("User-Agent", "")
+        port = await _relaunch_headless(ua)
+        if isinstance(port, dict):  # app_error envelope
+            return port
+        return {
+            "status": "headless",
+            "port": port,
+            "hint": "Login window closed; the engine-owned browser is "
+                    "headless again on the same profile. The signed-in "
+                    "session persisted on disk.",
+        }
+
+    if not url:
+        return app_error(
+            "login_window needs a `url` (the platform's sign-in page) "
+            "— or `close=true` to return to headless.",
+            code="MissingUrl",
+        )
+
+    port = await _launch_and_wait(None, app_url=url)
+    if isinstance(port, dict):  # app_error envelope
+        return port
+    name = label or url
+    return {
+        "status": "open",
+        "url": url,
+        "port": port,
+        "hint": f"A framed AgentOS sign-in window for {name} is on "
+                "screen. Ask the human to sign in there, poll the "
+                "app's check_session until it reports authenticated, "
+                "then call login_window(close=true) to return the "
+                "browser to headless.",
     }
