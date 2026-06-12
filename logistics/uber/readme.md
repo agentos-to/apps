@@ -15,13 +15,12 @@ product:
 
 # Uber
 
-Ride history, trip details, receipts, and account info from Uber. Uses Uber's internal GraphQL API at `riders.uber.com/graphql` via browser session cookies. Uber Eats uses a separate RPC API at `ubereats.com/_p/api/`.
+Ride history, trip details, receipts, and account info from Uber. Rides use Uber's internal GraphQL API at `riders.uber.com/graphql`; Uber Eats uses a separate RPC API at `ubereats.com/_p/api/`. **Browser-driven** — every request runs as a same-origin `fetch()` inside the engine-owned browser tab.
 
 > **Before extending this app**, read:
-> 1. [Reverse Engineering overview](../../../platform/docs/src/content/docs/apps/reverse-engineering/overview.md) — methodology, tools, progression
-> 2. [Transport & Anti-Bot](../../../platform/docs/src/content/docs/apps/reverse-engineering/1-transport.md) — TLS fingerprinting, WAF bypass, cookie domain filtering
-> 3. [requirements.md](./requirements.md) — captured API shapes, endpoint inventory, auth headers
-> 4. [Uber Eats E2E spec](../../../docs/specs/uber-eats-e2e.md) — the plan for what we're building
+> 1. [Browser-Driven Connectors](browser-driven on the system volume) — the pattern, the four footguns, the account trio
+> 2. [requirements.md](./requirements.md) — captured API shapes, endpoint inventory, request bodies
+> 3. Reference connectors: `apps/web/exa/exa.py`, `apps/dev/greptile/greptile.py`
 
 ## Features
 
@@ -31,42 +30,42 @@ Ride history, trip details, receipts, and account info from Uber. Uses Uber's in
 
 ### Account
 - **`whoami`** — Full user profile: name, email, phone, rating, picture URL, Uber One membership, payment methods, and profiles (personal/business).
-- **`check_session`** — Validate session cookies and return account identity.
+- **`check_session` / `login` / `logout`** — the rides account trio, bound to the riders.uber.com tab.
+- **`check_eats_session` / `login_eats` / `logout_eats`** — the Eats account trio (separate platform, separate ubereats.com session).
 
-## Setup
+## Auth — browser-driven (no cookies, no API keys)
 
-Requires an active Uber session in Brave (or another browser). The app extracts session cookies from the browser's cookie database. No API keys needed.
+The session **is the engine-owned browser profile**. Uber's auth cookies on `.uber.com` / `.ubereats.com` are written by Uber's own Set-Cookie, never extracted, never vaulted, never seen by this app. Every op runs as a same-origin `fetch()` evaluated inside the matching tab via the `browser_session` service (the Exa/Greptile pattern); the cookie rides because the fetch is same-origin, and the real browser supplies the live session, TLS fingerprint, and any anti-bot cookies by construction.
 
-1. Log in to [riders.uber.com](https://riders.uber.com) in Brave
-2. Cookies are extracted automatically when you use the app
+**Two registrable domains, two tabs** (one tab per domain):
 
-## Transport
+| Tab target | Platform | Wire |
+|---|---|---|
+| `riders.uber.com` | rides | GraphQL `POST /graphql` |
+| `www.ubereats.com` | Eats | RPC `POST /_p/api/{operation}` |
 
-Cookie auth against `.uber.com`. The rides API uses a single GraphQL endpoint:
+### Signing in
 
-```
-POST https://riders.uber.com/graphql
-```
+Sign in **once, headed**, in the AgentOS browser:
 
-**IMPORTANT:** Always use `http.headers(waf="cf", accept="json", extra={...})` for all HTTP
-requests in this app. The engine sets zero default headers — without `http.headers()`, you
-get no User-Agent, no sec-ch-*, no Sec-Fetch-* — and some Uber endpoints reject the request.
-We are acting as Brave, so always send what Brave sends. See `docs/apps/overview.md`.
+1. Open `riders.uber.com` (rides) and/or `ubereats.com` (Eats) in the AgentOS browser.
+2. Complete Uber's phone/email OTP + any anti-bot challenge as a human — the durable, safe path; there's no stable form shape to drive blind.
+3. The session lands in the browser profile. Every op rides it from then on.
 
-Rides-specific headers (pass via `extra=`):
-- `x-csrf-token: x` (literal string, not a real CSRF token)
-- `x-uber-rv-session-type: desktop_session`
+`login` / `login_eats` report the live session when one exists, and otherwise return a NeedsAuth `app_error` pointing you to sign in headed. `logout` / `logout_eats` clear the session in the profile.
 
-Three GraphQL operations:
-- `CurrentUserRidersWeb` — user profile
-- `Activities` — trip history with filtering/pagination
-- `GetTrip` — full trip details with receipt
+### Native-interface note
 
-### Cookie domain filtering
+A same-origin `fetch()` of `/graphql` (rides) or `/_p/api/{op}` (Eats) is **byte-identical** to what Uber's own React app sends — it's the lowest stable contract that already carries the session. We do **not** reach into Uber's minified JS modules; the wire IS the tap.
 
-Uber has cookies on multiple subdomains (`.uber.com`, `.riders.uber.com`, `.auth.uber.com`). The engine's RFC 6265 domain matching ensures only cookies matching `riders.uber.com` are sent. This prevents `csid` collisions from sibling subdomains that caused login redirects before domain filtering was implemented.
+### App-level contract headers
 
-See [Transport & Anti-Bot docs](../../docs/reverse-engineering/1-transport/index.md#cookie-domain-filtering--rfc-6265) for details.
+The real browser supplies all browser headers (UA, Sec-CH-UA*, Sec-Fetch-*). The app adds only Uber's literal app-level headers — not a fingerprint:
+
+- Rides: `x-csrf-token: x` (literal string, not a rotating token), `x-uber-rv-session-type: desktop_session`
+- Eats: `x-csrf-token: x`
+
+Three rides GraphQL operations: `CurrentUserRidersWeb` (profile), `Activities` (trip history), `GetTrip` (trip detail).
 
 ## Uber Eats (in progress)
 
@@ -174,16 +173,11 @@ Fix when a future order actually produces a non-empty chat we can shape against.
 
 ### Troubleshooting
 
-**`rtapi.forbidden` on `getUserV1` / `code=3` on `getPastOrdersV1` / `401` on `getDraftOrdersByEaterUuidV1`** — session cookies are visitor-level, not user-level. `search_stores` / anonymous endpoints still work because they don't need a logged-in identity, which masks the failure. The auth-resolver reports `ok` either way because the transport auth works; only the per-endpoint logic rejects.
+**`SESSION_EXPIRED` / `{authenticated: false}` / NeedsAuth from any op** — there's no live Uber session in the AgentOS browser profile, OR the tab got bounced to `auth.uber.com` (logged out). Sign in once headed: open `riders.uber.com` (rides) or `ubereats.com` (Eats) in the AgentOS browser and complete sign-in. No cookie flushing, no SQLite staleness to worry about — the session is the live browser profile, so it's fresh by construction. Run `check_session` / `check_eats_session` to confirm.
 
-Two common causes:
+**`rtapi.forbidden` on `getUserV1` / `code=3` on `getPastOrdersV1` / `401` on `getDraftOrdersByEaterUuidV1`** — the tab's session is visitor-level, not user-level (you're signed out of Eats specifically). `search_stores` / anonymous endpoints still work because they don't need a logged-in identity, which can mask the failure. Sign in headed at [ubereats.com](https://www.ubereats.com) in the AgentOS browser.
 
-1. **Brave cookie staleness.** Brave (and all Chromium browsers) buffer cookie writes and only flush to the on-disk SQLite DB periodically. `get-cookie.py` reads from disk, so after a fresh login the app sees the *pre-login* cookie set — `uev2.id.session` / `uev2.ts.session` / `jwt-session` are stale, and Uber downgrades the session to visitor. **Fix:** trigger Brave to flush. Easiest: open any ubereats.com page in Brave and let it make at least one authenticated XHR (the `/ramen*/events/recv` or `getUserV1` round-trip will do it). CDP-based `browse-capture.py /orders` also works and is scriptable. Repeat the app call and it will see the fresh cookies.
-2. **You're actually logged out.** Check that `uev2.id.session_v2` and `sid` are in the extracted cookie set. If not, log in to [ubereats.com](https://www.ubereats.com) in Brave.
-
-**`Multiple accounts. Specify account: Joe, default`** — the app has two `account` entries in credentials (a legacy one and the current session). Pass `account: "default"` to `run()` to disambiguate. We should collapse these — tracked but not yet done.
-
-**`invalid_uuid` / 404 on `getMenuItemV1`** — `get_item_customizations` needs both `section_uuid` and `subsection_uuid`. The app now auto-fetches them from `getStoreV1` when omitted; if you see this error again, the item UUID itself is stale or wrong.
+**`invalid_uuid` / 404 on `getMenuItemV1`** — `get_item_customizations` needs both `section_uuid` and `subsection_uuid`. The app auto-fetches them from `getStoreV1` when omitted; if you see this error again, the item UUID itself is stale or wrong.
 
 ## Reverse Engineering Notes
 

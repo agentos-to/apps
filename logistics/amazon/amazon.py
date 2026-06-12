@@ -2,33 +2,44 @@
 """
 Amazon app — search, products, order history, and account identity.
 
-Uses Amazon's public completion.amazon.com API for keyword suggestions
-and lxml HTML parsing for account pages. Order history and account
-operations use session cookies from a browser cookie provider via the
-``web`` connection (``client="browser"``). No API keys required.
+Two halves, two substrates:
 
-Transport notes (see docs/reverse-engineering/1-transport/):
-- ``client="browser"`` supplies full client hints (UA, Sec-CH-UA*,
-  Sec-Fetch-*, Accept-*) required by Amazon's Lightsaber bot detection.
-  Without them, auth pages redirect to login.
-- ``skip_cookies=_SKIP_COOKIES`` — ``csd-key`` triggers Siege client-side
-  encryption, ``csm-hit`` and ``aws-waf-token`` trip bot detection.
-  Applied via the ``_get`` / ``_post`` helpers so every authed request
-  strips them.
-- Session warming: ``_warm_session()`` hits the homepage before deep
-  links; Amazon flags cold deep-link sessions as bot traffic.
-- Accept-Encoding: the engine handles brotli/gzip decompression
-  automatically.
+- **Public half** (``search_suggestions``, ``search_products``,
+  ``get_product``): plain ``client.get`` against Amazon's public
+  completion API + HTML pages — the ``public`` connection. No cookies.
+- **Account half** (order history, lists, subscriptions, identity, the
+  account trio): every op runs as a same-origin ``fetch()`` evaluated
+  *inside* a tab of the engine-owned browser via the ``browser_session``
+  service (the Exa/Greptile/Uber pattern). The session is the browser
+  profile itself — Amazon's ``.amazon.com`` auth cookies (``at-main``,
+  ``sess-at-main``, ``sst-main``, …), written by Amazon's own Set-Cookie,
+  never extracted, never vaulted, never seen by this app. Requests
+  originate from the real browser, so the live session, real TLS
+  fingerprint, and every anti-bot cookie ride by construction.
+
+Native-interface note: the browser tab IS a warm, real Amazon session, so
+the whole cookie-vault era's anti-bot machinery (custom client hints,
+``skip_cookies`` to drop ``csd-key``/``csm-hit``/``aws-waf-token``, the
+homepage session-warming hop) is *gone* — those existed only to fake a
+real browser, and the tab no longer needs faking. We still fetch the same
+endpoint paths and feed their HTML to the same lxml parsers; only the
+transport changed.
+
+Amazon's sign-in is email + password + frequent OTP/CAPTCHA, fronted by
+heavy anti-bot (Lightsaber). There is no stable form to drive blind, so
+``login`` returns a NeedsAuth ``app_error``: the human signs in once headed
+in the AgentOS browser, after which the session lives in the profile and
+every account op rides it. ``check_session`` + ``logout`` are fully
+implemented against the tab.
 """
 
 import json
 import re
 import sys
 import asyncio
-import time
 from typing import Any
 
-from agentos import claims, client, connection, molt, normalize_email, parse_int, returns, test, timeout, url
+from agentos import account, app_error, claims, client, connection, molt, normalize_email, parse_int, returns, services, test, timeout, url
 from lxml import html as lhtml
 from lxml.html import HtmlElement
 
@@ -38,20 +49,114 @@ connection(
     description='Public Amazon pages and autocomplete API — no auth needed',
     client='browser')
 
-connection(
-    'web',
-    description='Amazon account — orders, recommendations, account details',
-    base_url='https://www.amazon.com',
-    client='browser',
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # amazon.com tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py. (Amazon is anti-bot
-    # hardened — expect real reverse-engineering, not just a transport swap.)
-    auth={'type': 'cookies', 'domain': '.amazon.com', 'account': {'check': 'check_session'}},
-    label='Amazon Session',
-    help_url='https://www.amazon.com/ap/signin')
+
+# ───────────────────────────────────────────────────────────────────────────
+# Browser-session transport — every account op runs as a same-origin fetch()
+# evaluated inside the www.amazon.com tab of the engine-owned browser. The
+# session is the browser profile; nothing is extracted or vaulted.
+# Template: apps/web/exa/exa.py, apps/dev/greptile/greptile.py,
+# apps/logistics/uber/uber.py.
+# ───────────────────────────────────────────────────────────────────────────
+
+# browser_session target — a URL substring; the engine opens
+# https://<target>/ in the engine-owned browser when no tab matches. One tab
+# per registrable domain: www.amazon.com (and its amazon.com family).
+_TARGET = "www.amazon.com"
+
+
+# Readiness wait, prepended to every op body. A freshly opened tab is still
+# at about:blank when our JS first runs — a relative-URL fetch has no origin
+# to resolve against, and a cross-origin fetch wouldn't carry the
+# ``.amazon.com`` cookie. We wait until the document has settled on an
+# amazon.com origin before the body runs. ``__onApp`` tells the body whether
+# the tab is on amazon.com proper (vs bounced to the ap/signin auth flow when
+# logged out).
+_PRELUDE = """
+const __deadline = Date.now() + 15000;
+while (location.hostname.indexOf('amazon.com') === -1 || document.readyState !== 'complete') {
+  if (Date.now() > __deadline) return { __error: 'tab_not_ready' };
+  await new Promise(r => setTimeout(r, 200));
+}
+const __onApp = location.pathname.indexOf('/ap/signin') === -1
+  && location.hostname.indexOf('amazon.com') !== -1;
+"""
+
+
+async def _eval(body: str, *, timeout_s: int = 45):
+    """Run an op body inside the www.amazon.com tab in the engine-owned browser.
+
+    The engine matchmakes the ``browser_session`` provider, opens the tab
+    (and launches the browser) when needed, and returns the JS value. The
+    body runs only once the tab has settled on an amazon.com origin, with
+    ``__onApp`` in scope (False when Amazon bounced us to the sign-in flow).
+    """
+    return await services.call(services.browser_session, params={
+        "target": _TARGET,
+        "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
+        "timeout": timeout_s,
+    })
+
+
+async def _tab_request(method: str, u: str, *, json_body=None, headers=None) -> dict:
+    """One same-origin fetch() inside the www.amazon.com tab.
+
+    Returns ``{status, json, body, url}`` so op bodies can read the HTML
+    ``body`` for the existing lxml parsers exactly as they did against the
+    HTTP client. The cookie rides automatically because the fetch is
+    same-origin.
+    """
+    opts = {"method": method.upper(), "credentials": "include", "cache": "no-store",
+            "headers": dict(headers or {})}
+    if json_body is not None:
+        opts["headers"]["Content-Type"] = "application/json"
+        opts["body"] = json.dumps(json_body)
+    value = await _eval(f"""
+if (!__onApp) return {{ __error: 'session_expired' }};
+const r = await fetch({json.dumps(u)}, {json.dumps(opts)});
+const text = await r.text();
+let parsed = null;
+try {{ parsed = JSON.parse(text); }} catch (e) {{}}
+return {{ status: r.status, json: parsed, body: parsed ? '' : text, url: r.url }};
+""")
+    return value
+
+
+def _check_tab(resp, *, what: str) -> dict:
+    """Translate an _eval/_tab_request return into a usable dict or raise.
+
+    ``__error: session_expired`` (tab bounced to the sign-in flow) and
+    ``tab_not_ready`` both mean "no live session" — surface as
+    SESSION_EXPIRED so callers report unauthenticated cleanly.
+    """
+    if not isinstance(resp, dict):
+        raise RuntimeError(f"{what}: tab eval returned {resp!r}")
+    err = resp.get("__error")
+    if err in ("session_expired", "tab_not_ready"):
+        raise RuntimeError(
+            f"SESSION_EXPIRED: no live Amazon session in the AgentOS browser profile ({what})."
+        )
+    if err:
+        raise RuntimeError(f"{what} failed in the tab: {err}")
+    return resp
+
+
+async def _get_html(u: str, *, headers=None, what: str) -> str:
+    """GET a URL same-origin in the tab and return its HTML body for lxml.
+
+    Raises SESSION_EXPIRED if the tab is logged out or Amazon bounced the
+    request to the sign-in page.
+    """
+    resp = _check_tab(await _tab_request("GET", u, headers=headers), what=what)
+    status = resp.get("status") or 0
+    body = resp.get("body") or ""
+    url_final = resp.get("url") or ""
+    if "ap/signin" in url_final or _is_login_redirect_body(body):
+        raise RuntimeError(
+            f"SESSION_EXPIRED: Amazon redirected to login ({what}) — sign in headed."
+        )
+    if status != 200:
+        raise RuntimeError(f"Amazon HTTP {status} ({what}) url={url_final}")
+    return body
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -443,36 +548,12 @@ def _parse_product_page(body: str, asin: str, tld: str) -> dict[str, Any]:
 
 BASE = "https://www.amazon.com"
 
-_SKIP_COOKIES = ["csd-key", "csm-hit", "aws-waf-token"]
 
-
-
-
-async def _warm_session() -> None:
-    """Visit homepage first so the ambient Jar accumulates Amazon's
-    first-party cookies before a sensitive deep-link; Amazon's anti-bot
-    flags direct deep-links from cold sessions."""
-    await client.get(BASE, headers={"Sec-Fetch-Site": "none"}, skip_cookies=_SKIP_COOKIES)
-
-
-async def _get(u, **kwargs):
-    """client.get with Amazon's mandatory skip_cookies filter pre-applied.
-    Without it, csd-key / csm-hit / aws-waf-token ride the outbound
-    Cookie: header and trip Lightsaber bot detection."""
-    return await client.get(u, skip_cookies=_SKIP_COOKIES, **kwargs)
-
-
-async def _post(u, **kwargs):
-    return await client.post(u, skip_cookies=_SKIP_COOKIES, **kwargs)
-    await asyncio.sleep(1.0)
-
-
-def _is_login_redirect(resp: dict, body: str) -> bool:
-    if "ap/signin" in str(resp["url"]):
-        return True
-    if "form[name='signIn']" in body[:5000]:
-        return True
-    return "ap_email" in body[:3000] or "signIn" in body[:3000]
+def _is_login_redirect_body(body: str) -> bool:
+    """Detect a sign-in page served in the response body (Amazon sometimes
+    serves the login form with a 200 instead of a redirect)."""
+    head = body[:5000]
+    return "form[name='signIn']" in head or "ap_email" in head[:3000] or "signIn" in head[:3000]
 
 
 def _parse(body: str) -> HtmlElement:
@@ -558,9 +639,13 @@ DETAIL_STATUS_SEL = SHIPMENT_STATUS_SEL + ["h4"]
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order[]")
-@connection("web")
+@connection("none")
 async def list_orders(*, filter=None, page=1, **params) -> list[dict[str, Any]]:
-    """List Amazon orders from the order history page."""
+    """List Amazon orders from the order history page.
+
+    Fetches the order-history HTML same-origin in the www.amazon.com tab —
+    the session rides the browser profile — and parses it with lxml.
+    """
     order_filter = filter or "last30"
     page = int(page or 1)
 
@@ -568,19 +653,11 @@ async def list_orders(*, filter=None, page=1, **params) -> list[dict[str, Any]]:
     if page > 1:
         url_params["startIndex"] = str((page - 1) * 10)
 
-    await _warm_session()
-
-    resp = await _get(
-        f"{BASE}/your-orders/orders",
-        params=url_params,
+    body = await _get_html(
+        url.build(f"{BASE}/your-orders/orders", params=url_params),
         headers={"Referer": f"{BASE}/gp/homepage.html"},
+        what="list_orders",
     )
-    body = resp["body"]
-
-    if _is_login_redirect(resp, body):
-        raise RuntimeError(
-            "SESSION_EXPIRED: Amazon redirected to login — session cookies are expired or invalid."
-        )
 
     result = _parse_order_history(body, page=page, order_filter=order_filter)
     return result["orders"]
@@ -795,22 +872,15 @@ def _parse_order_items(card: HtmlElement, *, detail_page: bool = False) -> list[
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("product[]")
-@connection("web")
+@connection("none")
 async def buy_again(**params) -> list[dict[str, Any]]:
     """Get products Amazon recommends for repurchase."""
 
-    await _warm_session()
-    resp = await _get(
+    body = await _get_html(
         f"{BASE}/gp/buyagain",
         headers={"Referer": f"{BASE}/your-orders/orders"},
+        what="buy_again",
     )
-    body = resp["body"]
-
-    if _is_login_redirect(resp, body):
-        raise RuntimeError(
-            "SESSION_EXPIRED: Amazon redirected to login — session cookies are expired or invalid."
-        )
-
     return _parse_buy_again(body)
 
 
@@ -861,24 +931,18 @@ def _parse_buy_again(body: str) -> list[dict[str, Any]]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns({"subscriptions": "array", "subscriptionCount": "integer", "upcomingDeliveries": "array", "totalSavings": "string"})
-@connection("web")
+@connection("none")
 @timeout(45)
 async def subscriptions(**params) -> dict[str, Any]:
     """List active Subscribe & Save subscriptions and upcoming deliveries."""
 
-    await _warm_session()
-
-    mgmt_resp = await _get(
+    mgmt_body = await _get_html(
         f"{BASE}/gp/subscribe-and-save/manager/viewsubscriptions",
         headers={"Referer": f"{BASE}/your-orders/orders"},
+        what="subscriptions",
     )
 
-    if _is_login_redirect(mgmt_resp, mgmt_resp["body"]):
-        raise RuntimeError(
-            "SESSION_EXPIRED: Amazon redirected to login — session cookies are expired or invalid."
-        )
-
-    mgmt_soup = _parse(mgmt_resp["body"])
+    mgmt_soup = _parse(mgmt_body)
 
     ship_id = None
     for tab in mgmt_soup.cssselect("[role='tab']"):
@@ -920,21 +984,24 @@ async def subscriptions(**params) -> dict[str, Any]:
 
     items: list[dict[str, Any]] = []
     if ship_id:
-        ajax_resp = await _get(
-            f"{BASE}/auto-deliveries/ajax/subscriptionList",
-            params={
-                "deviceType": "desktop",
-                "deviceContext": "web",
-                "shipId": ship_id,
-            },
-            headers={
-                "Referer": f"{BASE}/auto-deliveries/subscriptionList",
-                "X-Requested-With": "XMLHttpRequest",
-                "Accept": "text/html, */*",
-            },
+        ajax_resp = _check_tab(
+            await _tab_request(
+                "GET",
+                url.build(f"{BASE}/auto-deliveries/ajax/subscriptionList", params={
+                    "deviceType": "desktop",
+                    "deviceContext": "web",
+                    "shipId": ship_id,
+                }),
+                headers={
+                    "Referer": f"{BASE}/auto-deliveries/subscriptionList",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "text/html, */*",
+                },
+            ),
+            what="subscriptions_ajax",
         )
-        if ajax_resp["status"] == 200:
-            items = _parse_subscriptions(ajax_resp["body"])
+        if ajax_resp.get("status") == 200:
+            items = _parse_subscriptions(ajax_resp.get("body") or "")
 
     return {
         "totalSavings": savings,
@@ -1019,24 +1086,17 @@ def _parse_subscriptions(body: str) -> list[dict[str, Any]]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order")
-@connection("web")
+@connection("none")
 async def get_order(*, order_id, **params) -> dict[str, Any]:
     """Fetch detailed info for a specific Amazon order."""
     if not order_id:
         raise ValueError("order_id is required")
 
-    await _warm_session()
-
-    resp = await _get(
-        f"{BASE}/gp/your-account/order-details",
-        params={"orderID": order_id},
+    body = await _get_html(
+        url.build(f"{BASE}/gp/your-account/order-details", params={"orderID": order_id}),
         headers={"Referer": f"{BASE}/your-orders/orders"},
+        what="get_order",
     )
-    body = resp["body"]
-
-    if _is_login_redirect(resp, body):
-        raise RuntimeError("SESSION_EXPIRED: Amazon redirected to login — session cookies expired.")
-
     return _parse_order_detail(body, order_id)
 
 
@@ -1188,22 +1248,15 @@ MAX_LIST_PAGES = 20
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("list[]")
-@connection("web")
+@connection("none")
 async def list_lists(**params) -> list[dict[str, Any]]:
     """List all of the user's Amazon lists (wishlists, shopping lists, etc.)."""
 
-    await _warm_session()
-    resp = await _get(
+    body = await _get_html(
         f"{BASE}/hz/wishlist/ls",
         headers={"Referer": BASE},
+        what="list_lists",
     )
-    body = resp["body"]
-
-    if _is_login_redirect(resp, body):
-        raise RuntimeError(
-            "SESSION_EXPIRED: Amazon redirected to login — session cookies are expired or invalid."
-        )
-
     return _parse_lists_nav(body)
 
 
@@ -1250,7 +1303,7 @@ def _parse_lists_nav(body: str) -> list[dict[str, Any]]:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("list")
-@connection("web")
+@connection("none")
 @timeout(60)
 async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
     """Get items from a specific Amazon list by list ID."""
@@ -1264,19 +1317,12 @@ async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
     list_privacy = None
     list_type = None
 
-    await _warm_session()
-
-    resp = await _get(
-        f"{BASE}/hz/wishlist/ls/{list_id}",
-        params={"filter": item_filter, "sort": "date-added", "viewType": "list"},
+    body = await _get_html(
+        url.build(f"{BASE}/hz/wishlist/ls/{list_id}",
+                  params={"filter": item_filter, "sort": "date-added", "viewType": "list"}),
         headers={"Referer": BASE},
+        what="get_list",
     )
-    body = resp["body"]
-
-    if _is_login_redirect(resp, body):
-        raise RuntimeError(
-            "SESSION_EXPIRED: Amazon redirected to login — session cookies are expired or invalid."
-        )
 
     soup = _parse(body)
 
@@ -1304,18 +1350,21 @@ async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
         if not show_more:
             break
 
-        await asyncio.sleep(1.0)
-        ajax_resp = await _get(
-            f"{BASE}{show_more}" if show_more.startswith("/") else show_more,
-            headers={
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": f"{BASE}/hz/wishlist/ls/{list_id}",
-            },
+        ajax_resp = _check_tab(
+            await _tab_request(
+                "GET",
+                f"{BASE}{show_more}" if show_more.startswith("/") else show_more,
+                headers={
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": f"{BASE}/hz/wishlist/ls/{list_id}",
+                },
+            ),
+            what="get_list_ajax",
         )
-        if ajax_resp["status"] != 200:
+        if ajax_resp.get("status") != 200:
             break
 
-        ajax_body = ajax_resp["body"]
+        ajax_body = ajax_resp.get("body") or ""
         ajax_soup = _parse(ajax_body)
 
         page_items = _parse_list_items(ajax_soup)
@@ -1444,31 +1493,19 @@ def _parse_list_items(soup: HtmlElement) -> list[dict[str, Any]]:
 _AMAZON = {"shape": "organization", "url": "https://amazon.com", "name": "Amazon"}
 
 
-@test.skip(reason='destructive or unsupported — migrated from yaml')
-@returns("account")
-@claims("primary_user")
-@connection("web")
-async def check_session(**params) -> dict[str, Any]:
-    """Check session liveness and return the authed account identity.
+async def _account_identity() -> dict[str, Any] | None:
+    """Read the signed-in Amazon identity from inside the tab, or None.
 
-    Identity is keyed on the account email scraped from `/ax/account/manage`
-    (Login & Security). When Amazon gates that page behind a single-factor
-    step-up challenge, we return `authenticated: false` — that triggers the
-    engine's auto-relogin path, which dispatches the app's `login` tool
-    to complete the step-up. Until that `login` tool ships, the call
-    surfaces as an auth failure instead of silently producing a non-email
-    identifier.
-
-    Service-specific fields (customerId, marketplaceId, isPrime) ride in
-    `metadata.amazon` per the account-check protocol.
+    Fetches the homepage (for customerId / marketplace / Prime / display
+    name) and the Login & Security page (for the canonical email) same-origin
+    in the www.amazon.com tab. Returns None when no live session is present
+    (tab bounced to sign-in, or no email available).
     """
+    try:
+        body = await _get_html(f"{BASE}/gp/css/homepage.html", what="check_session")
+    except RuntimeError:
+        return None
 
-    await _warm_session()
-    resp = await _get(f"{BASE}/gp/css/homepage.html")
-    if resp["status"] != 200 or "ap/signin" in str(resp["url"]):
-        return {"authenticated": False}
-
-    body = resp["body"]
     customer_id = re.search(r'"customerId"\s*:\s*"([A-Z0-9]+)"', body)
     marketplace = re.search(r"ue_mid\s*=\s*'([^']+)'", body)
     is_prime = bool(re.search(r"isPrimeMember[=:]\s*['\"]?true", body, re.I))
@@ -1478,13 +1515,14 @@ async def check_session(**params) -> dict[str, Any]:
     )
 
     # Login & Security is behind a step-up challenge for most sessions.
-    # No email = no identity — surface the session as not-authenticated.
-    manage = await _get(f"{BASE}/ax/account/manage")
-    if manage["status"] != 200 or "ap/signin" in str(manage["url"]):
-        return {"authenticated": False}
-    em = re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", manage["body"])
+    # No email = no identity — treat the session as not-authenticated.
+    try:
+        manage_body = await _get_html(f"{BASE}/ax/account/manage", what="check_session_manage")
+    except RuntimeError:
+        return None
+    em = re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", manage_body)
     if not em:
-        return {"authenticated": False}
+        return None
 
     metadata: dict[str, Any] = {}
     if customer_id:
@@ -1507,6 +1545,86 @@ async def check_session(**params) -> dict[str, Any]:
     if metadata:
         result["metadata"] = {"amazon": metadata}
     return result
+
+
+def _needs_auth():
+    return app_error(
+        "No live Amazon session in the AgentOS browser profile. Sign in once "
+        "headed at amazon.com in the AgentOS browser — Amazon's login (email + "
+        "password + frequent OTP/CAPTCHA, fronted by Lightsaber anti-bot) is "
+        "best cleared by a human, after which the session lives in the profile "
+        "and these account ops just work.",
+        code="NeedsAuth",
+    )
+
+
+@account.check
+@test.skip(reason='destructive or unsupported — migrated from yaml')
+@returns("account")
+@claims("primary_user")
+@connection("none")
+@timeout(60)
+async def check_session(**params) -> dict[str, Any]:
+    """Verify the Amazon session and identify the logged-in account.
+
+    The session lives in the engine-owned browser profile; this op asks
+    Amazon's own homepage + Login & Security pages from inside the
+    www.amazon.com tab. No cookie ever reaches the app.
+
+    Identity is keyed on the account email scraped from `/ax/account/manage`.
+    When Amazon gates that page behind a step-up challenge, or no live session
+    is present, we return `authenticated: false`. Service-specific fields
+    (customerId, marketplaceId, isPrime) ride in `metadata.amazon`.
+    """
+    identity = await _account_identity()
+    if not identity:
+        return {"authenticated": False}
+    return identity
+
+
+@account.login
+@returns("account | auth_challenge")
+@connection("none")
+@timeout(60)
+async def login(**params) -> dict[str, Any]:
+    """Report the live Amazon session — or tell the user to sign in headed.
+
+    Returns the `account` when the browser profile already holds a live
+    amazon.com session. Otherwise returns a NeedsAuth `app_error`: Amazon's
+    sign-in is email + password + frequent OTP/CAPTCHA, fronted by heavy
+    anti-bot (Lightsaber), with no stable form shape to drive blind. The
+    durable, safe move is for the human to sign in once headed in the AgentOS
+    browser; the session then lives in the profile and every account op rides
+    it.
+    """
+    identity = await _account_identity()
+    if identity:
+        return identity
+    return _needs_auth()
+
+
+@account.logout
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(60)
+async def logout(**params) -> dict[str, Any]:
+    """Sign out of Amazon in the browser profile.
+
+    Drives Amazon's own sign-out same-origin in the www.amazon.com tab. The
+    response's Set-Cookie clears the session from the browser profile.
+    Idempotent — a dead session is still a clean logout.
+    """
+    await _eval("""
+if (!__onApp) return { ok: true, already: 'logged_out' };
+try {
+  await fetch('/gp/flex/sign-out.html?path=%2Fgp%2Fyourstore%2Fhome&signIn=1&useRedirectOnSuccess=1&action=sign-out', { credentials: 'include' });
+} catch (e) {}
+return { ok: true };
+""")
+    return {
+        "status": "logged_out",
+        "hint": "Cleared the Amazon session in the browser profile. Re-auth by signing in headed at amazon.com.",
+    }
 
 
 

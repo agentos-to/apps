@@ -1,20 +1,56 @@
-"""Uber app — rides (GraphQL) and Eats (RPC) via browser session cookies."""
+"""uber.py — Uber rides (GraphQL) + Uber Eats (RPC) via the browser session.
+
+Both halves run **inside a tab of the engine-owned browser** via the
+``browser_session`` service (the Exa/Greptile pattern). The session is the
+browser profile itself — Uber's auth cookies on ``.uber.com`` /
+``.ubereats.com``, written by Uber's own Set-Cookie, never extracted, never
+vaulted, never seen by this app. Requests originate from the real browser, so
+the live session, TLS fingerprint, and any anti-bot cookies ride by
+construction.
+
+Two registrable domains, two tabs (one per ``one tab per domain`` rule):
+
+  - riders.uber.com  — rides. Uber's internal GraphQL at /graphql.
+  - www.ubereats.com — Eats. RPC-style POST at /_p/api/{operation}.
+
+Native-interface note: a same-origin ``fetch()`` of ``/graphql`` (rides) or
+``/_p/api/{op}`` (Eats) is byte-identical to the request Uber's own React app
+sends — it's the lowest stable contract that already carries the session. We
+do NOT reach into Uber's minified JS modules; the wire IS the tap.
+
+No anti-bot gymnastics (custom UA, Sec-CH-UA, http2 toggles, hand-rolled
+x-csrf) — the real browser tab supplies all of it. Uber's literal
+``x-csrf-token: x`` header is still sent because it's an app-level contract
+the endpoint checks, not a fingerprint.
+
+API shapes (GraphQL queries, RPC endpoint paths, request bodies) are
+unchanged from the cookie-transport version — see requirements.md.
+"""
 
 import json as _json
 import re as _re
 import uuid as uuid_mod
-from agentos import claims, client, connection, geocoding, provides, returns, test, timeout
+from agentos import account, app_error, claims, connection, geocoding, provides, returns, services, test, timeout
+
+# ---------------------------------------------------------------------------
+# browser_session targets — a URL substring; the engine opens https://<target>/
+# in the engine-owned browser when no tab matches. One tab per registrable
+# domain: riders.uber.com (and its uber.com family) vs www.ubereats.com.
+# ---------------------------------------------------------------------------
+
+_RIDES = "riders.uber.com"
+_EATS = "www.ubereats.com"
 
 # ---------------------------------------------------------------------------
 # Rides API — GraphQL at riders.uber.com
 # ---------------------------------------------------------------------------
 
-GRAPHQL_URL = "https://riders.uber.com/graphql"
+GRAPHQL_PATH = "/graphql"
 
-# Rides-specific headers merged on top of the ``web`` connection's
-# fetch-style ambient bundle (UA, Sec-CH-UA*, Sec-Fetch-*, Accept-*).
-# Without the browser bundle some endpoints return 500 — that's why
-# the connection is ``client="fetch"`` not ``client="api"``.
+# App-level contract header for the rides GraphQL endpoint. ``x-csrf-token: x``
+# is a literal string Uber's frontend always sends (not a real rotating token);
+# ``x-uber-rv-session-type`` flags the desktop session. Everything else (UA,
+# Sec-CH-UA*, Sec-Fetch-*) is supplied by the real browser tab.
 RIDES_EXTRA_HEADERS = {
     "x-csrf-token": "x",
     "x-uber-rv-session-type": "desktop_session",
@@ -22,17 +58,14 @@ RIDES_EXTRA_HEADERS = {
 
 # ---------------------------------------------------------------------------
 # Eats API — RPC at www.ubereats.com/_p/api/
-# Completely separate from rides: different domain, different auth, different protocol.
-# Auth: .ubereats.com cookies (via the "eats" connection declared in readme frontmatter)
-# Required header: x-csrf-token: x (literal string, same as rides)
+# Completely separate from rides: different domain, different protocol.
+# Required app-level header: x-csrf-token: x (literal string, same as rides).
 # ---------------------------------------------------------------------------
 
-EATS_API_BASE = "https://www.ubereats.com/_p/api"
+EATS_API_PATH = "/_p/api"
 
-# Eats headers: x-csrf-token is required. Other browser headers (UA,
-# Sec-CH-UA*, Sec-Fetch-*) come from the ``eats`` connection's
-# fetch-style ambient bundle; without them getReceiptByWorkflowUuidV1
-# returns 500.
+# Eats app-level contract header. x-csrf-token is required by the endpoint;
+# the rest of the browser headers come from the real tab.
 EATS_EXTRA_HEADERS = {
     "x-csrf-token": "x",
 }
@@ -197,43 +230,128 @@ query GetTrip($tripUUID: String!) {
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Browser-session transport
+# ---------------------------------------------------------------------------
+# Every request runs as a same-origin fetch() evaluated inside the matching
+# Uber tab of the engine-owned browser. The session is the browser profile;
+# nothing is extracted or vaulted. Template: apps/web/exa/exa.py,
+# apps/dev/greptile/greptile.py.
 # ---------------------------------------------------------------------------
 
-async def _gql(operation_name: str, query: str, variables: dict | None = None) -> dict:
-    """Execute a GraphQL query against riders.uber.com.
 
-    Ambient cookies + fetch-style browser headers are supplied by the
-    ``web`` connection (client="fetch"); the app only adds x-csrf-token.
+def _prelude(family: str) -> str:
+    """Readiness wait, prepended to every op body.
+
+    A freshly opened tab is still at about:blank when our JS first runs — a
+    relative-URL fetch has no origin to resolve against, and a cross-origin
+    fetch wouldn't carry the session cookie. We wait until the document has
+    settled on the right Uber family origin before the body runs. ``family``
+    is ``uber.com`` (rides) or ``ubereats.com`` (eats); ``__onApp`` tells the
+    body whether the tab is on the expected host (vs bounced to auth.uber.com
+    when logged out).
     """
-    resp = await client.post(
-        GRAPHQL_URL,
-        json={
-            "operationName": operation_name,
-            "query": query,
-            "variables": variables or {},
-        },
-        headers=RIDES_EXTRA_HEADERS,
-    )
+    return f"""
+const __deadline = Date.now() + 15000;
+while (location.hostname.indexOf({_json.dumps(family)}) === -1 || document.readyState !== 'complete') {{
+  if (Date.now() > __deadline) return {{ __error: 'tab_not_ready' }};
+  await new Promise(r => setTimeout(r, 200));
+}}
+const __onApp = location.hostname.indexOf('auth.uber.com') === -1;
+"""
+
+
+_RIDES_PRELUDE = _prelude("uber.com")
+_EATS_PRELUDE = _prelude("ubereats.com")
+
+
+async def _eval(target: str, body: str, *, timeout_s: int = 45):
+    """Run an op body inside the target's tab in the engine-owned browser.
+
+    The engine matchmakes the ``browser_session`` provider, opens the tab
+    (and launches the browser) when needed, and returns the JS value. The
+    body runs only once the tab has settled on the right Uber origin, with
+    ``__onApp`` in scope (False when Uber bounced us to auth.uber.com).
+    """
+    prelude = _EATS_PRELUDE if target == _EATS else _RIDES_PRELUDE
+    return await services.call(services.browser_session, params={
+        "target": target,
+        "js": "(async () => {\n" + prelude + body + "\n})()",
+        "timeout": timeout_s,
+    })
+
+
+async def _tab_request(target: str, method: str, url: str, *,
+                       json_body=None, headers=None) -> dict:
+    """One same-origin fetch() inside the target's tab.
+
+    Returns ``{status, json, body}`` so op bodies can read ``resp["json"]`` /
+    ``resp.get("status")`` exactly as they did against the HTTP client. The
+    cookie rides automatically because the fetch is same-origin.
+    """
+    opts = {"method": method.upper(), "credentials": "include", "cache": "no-store",
+            "headers": dict(headers or {})}
+    if json_body is not None:
+        opts["headers"]["Content-Type"] = "application/json"
+        opts["body"] = _json.dumps(json_body)
+    value = await _eval(target, f"""
+if (!__onApp) return {{ __error: 'session_expired' }};
+const r = await fetch({_json.dumps(url)}, {_json.dumps(opts)});
+const text = await r.text();
+let parsed = null;
+try {{ parsed = JSON.parse(text); }} catch (e) {{}}
+return {{ status: r.status, json: parsed, body: parsed ? '' : text, url: r.url }};
+""")
+    return value
+
+
+def _check_tab(resp, *, what: str) -> dict:
+    """Translate an _eval/_tab_request return into a usable dict or raise.
+
+    ``__error: session_expired`` (the tab bounced to auth.uber.com) and
+    ``tab_not_ready`` both mean "no live session" — surface as SESSION_EXPIRED
+    so callers' check_session paths report unauthenticated cleanly.
+    """
+    if not isinstance(resp, dict):
+        raise RuntimeError(f"{what}: tab eval returned {resp!r}")
+    err = resp.get("__error")
+    if err == "session_expired" or err == "tab_not_ready":
+        raise RuntimeError(f"SESSION_EXPIRED: no live Uber session in the AgentOS browser profile ({what}).")
+    if err:
+        raise RuntimeError(f"{what} failed in the tab: {err}")
+    return resp
+
+
+async def _gql(operation_name: str, query: str, variables: dict | None = None) -> dict:
+    """Execute a GraphQL query against riders.uber.com via the rides tab.
+
+    Native-interface note: this same-origin POST of {operationName, query,
+    variables} to /graphql is byte-identical to what Uber's rider React app
+    sends — the stable tap. The real browser supplies all browser headers; we
+    add only the app-level x-csrf-token contract.
+    """
+    resp = _check_tab(
+        await _tab_request(_RIDES, "POST", GRAPHQL_PATH,
+                           json_body={
+                               "operationName": operation_name,
+                               "query": query,
+                               "variables": variables or {},
+                           },
+                           headers=RIDES_EXTRA_HEADERS),
+        what=f"GraphQL {operation_name}")
 
     status = resp.get("status") or 0
     body_str = resp.get("body") or ""
     url_final = resp.get("url") or ""
     if status != 200:
         if "auth.uber.com" in body_str or "auth.uber.com" in url_final:
-            raise RuntimeError("SESSION_EXPIRED: Uber redirected to login — cookies expired.")
-        raise RuntimeError(f"Uber GraphQL HTTP {status} url={url_final} ct={resp.get('content_type','')} body={body_str[:200]}")
+            raise RuntimeError("SESSION_EXPIRED: Uber redirected to login — session expired.")
+        raise RuntimeError(f"Uber GraphQL HTTP {status} url={url_final} body={body_str[:200]}")
     body = resp.get("json")
     if not body or not isinstance(body, dict):
-        raise RuntimeError(f"Uber GraphQL returned non-JSON: status={status} ct={resp.get('content_type','')} len={len(body_str)} body={body_str[:300]}")
+        raise RuntimeError(f"Uber GraphQL returned non-JSON: status={status} len={len(body_str)} body={body_str[:300]}")
     if body.get("errors"):
         raise RuntimeError(f"Uber GraphQL error: {body['errors']}")
     return body.get("data", {})
-
-
-def _is_login_redirect(resp: dict) -> bool:
-    url = str(resp.get("url", ""))
-    return "auth.uber.com" in url or "/v2/?" in url
 
 
 from price_parser import Price
@@ -275,21 +393,45 @@ _UBER = {"shape": "product", "url": "https://uber.com", "name": "Uber"}
 _UBER_EATS = {"shape": "product", "url": "https://ubereats.com", "name": "Uber Eats"}
 
 
+def _rides_needs_auth():
+    return app_error(
+        "No live Uber rider session in the AgentOS browser profile. Sign in "
+        "once headed at riders.uber.com in the AgentOS browser — Uber's login "
+        "(phone/email OTP + anti-bot) is best cleared by a human, after which "
+        "the session lives in the profile and these ops just work.",
+        code="NeedsAuth",
+    )
+
+
+def _eats_needs_auth():
+    return app_error(
+        "No live Uber Eats session in the AgentOS browser profile. Sign in "
+        "once headed at ubereats.com in the AgentOS browser.",
+        code="NeedsAuth",
+    )
+
+
+@account.check
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("account")
 @claims("primary_user")
-@connection("web")
+@connection("none")
+@timeout(60)
 async def check_session(**params) -> dict:
-    """Validate Uber session and return account identity."""
+    """Verify the Uber rider session and identify the logged-in account.
 
+    The session lives in the engine-owned browser profile; this op asks Uber's
+    own ``CurrentUserRidersWeb`` GraphQL query from inside the riders.uber.com
+    tab. No cookie ever reaches the app.
+    """
     try:
         data = await _gql("CurrentUserRidersWeb", CURRENT_USER_QUERY)
-    except RuntimeError as e:
-        return {"authenticated": False, "error": str(e)}
+    except RuntimeError:
+        return {"authenticated": False}
 
     user = data.get("currentUser")
     if not user:
-        return {"authenticated": False, "error": "no user data"}
+        return {"authenticated": False}
 
     return {
         "authenticated": True,
@@ -299,9 +441,60 @@ async def check_session(**params) -> dict:
     }
 
 
+@account.login
+@returns("account | auth_challenge")
+@connection("none")
+@timeout(60)
+async def login(**params) -> dict:
+    """Report the live Uber rider session — or tell the user to sign in headed.
+
+    Returns the ``account`` when the browser profile already holds a live
+    riders.uber.com session. Otherwise returns a NeedsAuth ``app_error``:
+    Uber's sign-in is a phone/email OTP flow fronted by heavy anti-bot, with
+    no stable form shape to drive blind. The durable, safe move is for the
+    human to sign in once headed in the AgentOS browser; the session then
+    lives in the profile and every op rides it.
+    """
+    try:
+        data = await _gql("CurrentUserRidersWeb", CURRENT_USER_QUERY)
+        user = data.get("currentUser")
+    except RuntimeError:
+        user = None
+    if user:
+        return {
+            "authenticated": True,
+            "at": _UBER,
+            "identifier": user.get("email") or user.get("uuid"),
+            "display": f"{user.get('firstName', '')} {user.get('lastName', '')}".strip(),
+        }
+    return _rides_needs_auth()
+
+
+@account.logout
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(60)
+async def logout(**params) -> dict:
+    """Sign out of Uber rides in the browser profile.
+
+    Drives Uber's own logout same-origin in the riders.uber.com tab, then
+    confirms the session is gone. Idempotent — a dead session is still a clean
+    logout.
+    """
+    await _eval(_RIDES, """
+if (!__onApp) return { ok: true, already: 'logged_out' };
+try { await fetch('/logout', { method: 'POST', credentials: 'include' }); } catch (e) {}
+return { ok: true };
+""")
+    return {
+        "status": "logged_out",
+        "hint": "Cleared the rider session in the browser profile. Re-auth by signing in headed at riders.uber.com.",
+    }
+
+
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns({"id": "string", "name": "string", "email": "string", "phone": "string", "rating": "string", "hasUberOne": "boolean", "paymentMethods": "array", "profiles": "array", "country": "string"})
-@connection("web")
+@connection("none")
 async def whoami(**params) -> dict:
     """Get current user profile with full details."""
 
@@ -343,7 +536,7 @@ async def whoami(**params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("trip[]")
-@connection("web")
+@connection("none")
 async def list_trips(
     limit: int = 10,
     next_page_token: str | None = None,
@@ -397,7 +590,7 @@ async def list_trips(
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("trip")
-@connection("web")
+@connection("none")
 async def get_trip(trip_id: str, **params) -> dict:
     """Get full trip details.
 
@@ -507,16 +700,18 @@ async def get_trip(trip_id: str, **params) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _eats_post(endpoint: str, body: dict | None = None) -> dict:
-    """POST to Uber Eats RPC API. Endpoint is just the operation name (e.g. 'getPastOrdersV1').
+    """POST to Uber Eats RPC API via the eats tab. Endpoint is the operation
+    name (e.g. 'getPastOrdersV1'); query strings (e.g. 'getFeedV1?localeCode=en-US')
+    are preserved verbatim.
 
-    Ambient cookies + fetch-style browser headers come from the
-    ``eats`` connection; only x-csrf-token is app-specific.
+    Native-interface note: this same-origin POST to /_p/api/{op} is
+    byte-identical to what the Uber Eats React app sends — the stable tap. The
+    real browser supplies all browser headers; we add only x-csrf-token.
     """
-    resp = await client.post(
-        f"{EATS_API_BASE}/{endpoint}",
-        json=body or {},
-        headers=EATS_EXTRA_HEADERS,
-    )
+    resp = _check_tab(
+        await _tab_request(_EATS, "POST", f"{EATS_API_PATH}/{endpoint}",
+                           json_body=body or {}, headers=EATS_EXTRA_HEADERS),
+        what=f"Eats {endpoint}")
 
     status = resp.get("status") or 0
     body_str = resp.get("body") or ""
@@ -552,14 +747,21 @@ async def _eats_post(endpoint: str, body: dict | None = None) -> dict:
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("account")
 @claims("primary_user")
-@connection("eats")
+@connection("none")
+@timeout(60)
 async def check_eats_session(**params) -> dict:
-    """Validate Uber Eats session cookies."""
+    """Verify the Uber Eats session and identify the logged-in account.
 
+    Eats is a separate platform from rides — separate registrable domain
+    (ubereats.com), separate session in the browser profile. This op asks
+    Uber Eats' own ``getUserV1`` RPC from inside the ubereats.com tab. No
+    cookie ever reaches the app. (``check_session`` covers the rides session;
+    they're independent.)
+    """
     try:
         data = await _eats_post("getUserV1", {"shouldGetSubsMetadata": True})
-    except RuntimeError as e:
-        return {"authenticated": False, "error": str(e)}
+    except RuntimeError:
+        return {"authenticated": False}
 
     # getUserV1 returns user profile data — if we get here, session is valid
     user = data.get("user", data)
@@ -574,9 +776,58 @@ async def check_eats_session(**params) -> dict:
     }
 
 
+@returns("account | auth_challenge")
+@connection("none")
+@timeout(60)
+async def login_eats(**params) -> dict:
+    """Report the live Uber Eats session — or tell the user to sign in headed.
+
+    Returns the ``account`` when the browser profile already holds a live
+    ubereats.com session. Otherwise returns a NeedsAuth ``app_error``: like
+    rides, Uber Eats' OTP + anti-bot sign-in is best cleared once by a human
+    headed in the AgentOS browser, after which the session lives in the
+    profile. (Rides uses the ``login`` op; Eats is a separate session.)
+    """
+    try:
+        data = await _eats_post("getUserV1", {"shouldGetSubsMetadata": True})
+    except RuntimeError:
+        data = None
+    if data:
+        user = data.get("user", data)
+        name = user.get("name") or user.get("firstName", "")
+        email = user.get("email", "")
+        return {
+            "authenticated": True,
+            "at": _UBER_EATS,
+            "identifier": email or name or "unknown",
+            "display": name or email,
+        }
+    return _eats_needs_auth()
+
+
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(60)
+async def logout_eats(**params) -> dict:
+    """Sign out of Uber Eats in the browser profile.
+
+    Drives Uber Eats' own logout same-origin in the ubereats.com tab.
+    Idempotent — a dead session is still a clean logout.
+    """
+    await _eval(_EATS, """
+if (!__onApp) return { ok: true, already: 'logged_out' };
+try { await fetch('/logout', { method: 'POST', credentials: 'include' }); } catch (e) {}
+return { ok: true };
+""")
+    return {
+        "status": "logged_out",
+        "hint": "Cleared the Eats session in the browser profile. Re-auth by signing in headed at ubereats.com.",
+    }
+
+
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns({"id": "string", "name": "string", "email": "string", "phone": "string", "subscription": "object", "savedAddresses": "array", "paymentMethods": "array"})
-@connection("eats")
+@connection("none")
 async def get_eats_profile(**params) -> dict:
     """Get Uber Eats user profile — name, photo, subscription, business profiles.
 
@@ -637,7 +888,7 @@ async def get_eats_profile(**params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order[]")
-@connection("eats")
+@connection("none")
 async def list_deliveries(cursor: str = "", **params) -> list:
     """List Uber Eats order history as order-shaped entities.
 
@@ -742,7 +993,7 @@ async def list_deliveries(cursor: str = "", **params) -> list:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order")
-@connection("eats")
+@connection("none")
 async def get_delivery(order_uuid: str, **params) -> dict:
     """Get full delivery details including items, quantities, and fare breakdown.
 
@@ -894,7 +1145,7 @@ async def get_delivery(order_uuid: str, **params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("place")
-@connection("eats")
+@connection("none")
 async def get_store(store_uuid: str, **params) -> dict:
     """Get store details and full product catalog.
 
@@ -1088,7 +1339,7 @@ async def get_store(store_uuid: str, **params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("product")
-@connection("eats")
+@connection("none")
 @timeout(15)
 async def get_item_customizations(store_uuid: str, item_uuid: str, section_uuid: str = "", subsection_uuid: str = "", **params) -> dict:
     """Get customization options for a menu item (toppings, sizes, sides, etc.).
@@ -1203,7 +1454,7 @@ async def get_item_customizations(store_uuid: str, item_uuid: str, section_uuid:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("product[]")
-@connection("eats")
+@connection("none")
 @timeout(15)
 async def search_products(store_uuid: str, query: str, **params) -> list:
     """Search products within a store. Server-side search via getInStoreSearchV1.
@@ -1327,7 +1578,7 @@ async def search_products(store_uuid: str, query: str, **params) -> list:
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("place[]")
 @provides(geocoding)
-@connection("eats")
+@connection("none")
 async def search_address(query: str, resolve: bool = True, **params) -> list:
     """Search for addresses worldwide — autocomplete + geocoding.
 
@@ -1390,7 +1641,7 @@ async def search_address(query: str, resolve: bool = True, **params) -> list:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("place[]")
-@connection("eats")
+@connection("none")
 @timeout(15)
 async def list_addresses(**params) -> list:
     """List saved, suggested, and currently-active delivery addresses.
@@ -1474,7 +1725,7 @@ async def list_addresses(**params) -> list:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order")
-@connection("eats")
+@connection("none")
 @timeout(15)
 async def get_messages(order_uuid: str, **params) -> dict:
     """Get delivery chat messages for an order.
@@ -1505,7 +1756,7 @@ async def get_messages(order_uuid: str, **params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("place[]")
-@connection("eats")
+@connection("none")
 @timeout(15)
 async def search_stores(query: str = "", **params) -> list:
     """Search for stores/restaurants on Uber Eats by name or cuisine.
@@ -1556,7 +1807,7 @@ async def search_stores(query: str = "", **params) -> list:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("place[]")
-@connection("eats")
+@connection("none")
 async def list_nearby_stores(**params) -> list:
     """List nearby stores/restaurants available for delivery.
 
@@ -1859,7 +2110,7 @@ async def _build_delivery_address_from_record(delivery_address_uuid: str) -> dic
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order")
-@connection("eats")
+@connection("none")
 @timeout(60)
 async def add_to_cart(store_uuid: str, items: list, delivery_address_uuid: str,
                       currency_code: str = "USD", **params) -> dict:
@@ -1975,7 +2226,7 @@ async def add_to_cart(store_uuid: str, items: list, delivery_address_uuid: str,
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order[]")
-@connection("eats")
+@connection("none")
 async def get_cart(**params) -> list:
     """Get current Uber Eats carts as order-shaped entities (status: draft).
 
@@ -2028,7 +2279,7 @@ async def get_cart(**params) -> list:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns({"status": "string", "draftOrderUuid": "string"})
-@connection("eats")
+@connection("none")
 async def clear_cart(draft_order_uuid: str, **params) -> dict:
     """Discard a draft order (clear the cart for a store)."""
     await _eats_post("discardDraftOrderV2", {"draftOrderUUID": draft_order_uuid})
@@ -2037,7 +2288,7 @@ async def clear_cart(draft_order_uuid: str, **params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order")
-@connection("eats")
+@connection("none")
 @timeout(60)
 async def checkout(draft_order_uuid: str, **params) -> dict:
     """Place an Uber Eats order from a draft cart.
@@ -2049,38 +2300,6 @@ async def checkout(draft_order_uuid: str, **params) -> dict:
 
     RE principle: replay, don't reconstruct. The checkout request shape was captured
     from a live browser order placement. See requirements.md for the full shape.
-
-connection(
-    'web',
-    description='Uber rider account — requires cookies from a logged-in browser session',
-    base_url='https://riders.uber.com',
-    domain='uber.com',
-    client='fetch',
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # riders.uber.com tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py.
-    auth={'type': 'cookies', 'domain': '.uber.com', 'account': {'check': 'check_session'}},
-    label='Uber Rider',
-    help_url='https://riders.uber.com')
-
-connection(
-    'eats',
-    description='Uber Eats — requires cookies from a logged-in ubereats.com browser session',
-    base_url='https://www.ubereats.com',
-    domain='ubereats.com',
-    client='fetch',
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # ubereats.com tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py.
-    auth={'type': 'cookies', 'domain': '.ubereats.com', 'account': {'check': 'check_eats_session'}},
-    label='Uber Eats',
-    help_url='https://www.ubereats.com')
-
-
     """
 
     # Step 1: Get checkout presentation — we need the checkout session UUID,
@@ -2261,7 +2480,7 @@ connection(
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order")
-@connection("eats")
+@connection("none")
 async def track_delivery(order_uuid: str = "", **params) -> dict:
     """Track a live Uber Eats delivery — courier location, ETA, progress, item fulfillment.
 

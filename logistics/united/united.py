@@ -1,105 +1,190 @@
 """
 United Airlines app — profile, MileagePlus balances, reservations,
-flight search, and travel history.
+flight search, and travel history. **Browser-driven** (the Exa/Greptile
+pattern): every op runs as a same-origin ``fetch()`` evaluated inside a tab
+of the engine-owned browser via the ``browser_session`` service. The session
+IS the browser profile.
 
-Auth mechanics (see requirements.md for the full story):
-- Session cookies live on `.united.com`. Critical cookies: AuthCookie,
-  Session, User, PIM-SESSION-ID, 1pc_session, _ucid, plus Akamai
-  bot-manager cookies (_abck, bm_*, ak_bmsc, akacd_*) which must pass
-  through unchanged.
-- Every API call wants `X-Authorization-api: bearer <hash>`. The bearer
-  is minted by GET /api/auth/anonymous-token — misleading name; with
-  cookies present it returns a USER-SCOPED token. Short-lived (~30min).
+Auth mechanics (see requirements.md for the full endpoint inventory):
+- United's auth + Akamai bot-manager cookies (AuthCookie, Session, User,
+  PIM-SESSION-ID, 1pc_session, _ucid, _abck, bm_*, ak_bmsc, akacd_*) live on
+  ``.united.com`` in the browser profile, written by United's own Set-Cookie —
+  never extracted, never vaulted, never seen by this app. Because requests
+  originate from the real browser tab, the live session, TLS fingerprint, and
+  every anti-bot cookie ride **by construction**. This is what defeats the
+  bot-manager the old cookie-replay transport had to fight.
+- Every API call wants ``X-Authorization-api: bearer <hash>``. The bearer is
+  minted by GET /api/auth/anonymous-token — misleading name; run same-origin
+  in the tab (cookies present), it returns a USER-SCOPED token. Short-lived
+  (~30min); minted fresh per authed request. We thread it on subsequent in-tab
+  fetches exactly as United's frontend does.
 
-Cookie sourcing:
-The default path reads cookies from the brave-browser provider (Brave's
-on-disk SQLite). That's often stale relative to what Brave has in memory
-— Brave flushes cookies lazily. To sidestep, this app provides:
+The account trio (check_session / login / logout) binds to
+``@connection("none")`` — there is no credential to ride; the session is the
+profile. ``login`` reports the live session or returns a NeedsAuth challenge
+telling the human to sign in once headed (United's username+password+MFA behind
+Akamai is best cleared by a real browser, not driven blind).
 
-- `store_session_cookies(cookies=<dict>)` — manual: caller passes the
-  fresh cookie values (maybe grabbed via CDP or the user's browser
-  devtools), we validate against /User/profile and persist via
-  __secrets__. The engine's credential store then becomes the freshest
-  source for future calls.
-
-- `login(cdp_port=9222)` — auto: connects to a live Brave/Chrome via
-  CDP, reads the in-memory cookies (no SQLite lag), validates, persists.
-  Requires Brave launched with --remote-debugging-port.
-
-Both live at the engine's credential-store tier (not Brave's), so
-staleness of Brave's disk DB becomes irrelevant.
+Template: apps/web/exa/exa.py, apps/dev/greptile/greptile.py.
 """
 
 import json as _json
 
-from agentos import client, connection, returns, timeout, app_secret, app_result
-
-
-connection(
-    "web",
-    description="united.com session — flights, reservations, MileagePlus",
-    base_url="https://www.united.com",
-    client="browser",
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # united.com tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py. (United is anti-bot
-    # hardened — expect real reverse-engineering, not just a transport swap.)
-    auth={"type": "cookies", "domain": ".united.com",
-          "account": {"check": "check_session"}},
-    label="United Session",
-    help_url="https://www.united.com/en/us/account/sign-in")
-
-
-# ── internal helpers ──────────────────────────────────────────────────────────
-
-async def _mint_bearer() -> str | None:
-    """Mint a user-scoped bearer via /api/auth/anonymous-token.
-
-    Despite the name, this endpoint inspects the session cookies on the
-    ambient jar and returns a user-scoped token if they're valid. Returns
-    None if the session is anonymous or the mint fails.
-    """
-    resp = await client.get("https://www.united.com/api/auth/anonymous-token", client="fetch")
-    if resp["status"] != 200:
-        return None
-    data = (resp["json"] or {}).get("data") or {}
-    return (data.get("token") or {}).get("hash")
+from agentos import (account, app_error, app_secret, claims, connection,
+                     returns, services, test, timeout)
 
 
 _BASE = "https://www.united.com"
 
+# browser_session target — a URL substring; the engine opens https://<target>/
+# in the engine-owned browser when no tab matches. One tab per registrable
+# domain (united.com).
+_UNITED = "www.united.com"
 
-async def _authed_get(path: str, **kwargs) -> dict:
-    """GET an authenticated API path. Mints bearer, passes cookies."""
+
+# ── browser-session transport ─────────────────────────────────────────────────
+# Every request runs as a same-origin fetch() evaluated inside the united.com
+# tab of the engine-owned browser. The session IS the browser profile — United's
+# auth + Akamai bot-manager cookies (AuthCookie, Session, _abck, bm_*, …) live
+# there, written by United's own Set-Cookie, never extracted, never vaulted,
+# never seen by this app. Requests originate from the real browser, so the live
+# session, TLS fingerprint, and every anti-bot cookie ride by construction —
+# which is exactly what defeats the Akamai bot-manager the old cookie-replay
+# transport had to fight. The whole anti-bot / fingerprint apparatus (custom UA,
+# Sec-* spoofing, http2 flags, cookie-header assembly) is GONE; the tab supplies
+# all of it.
+#
+# The anonymous-token mint and bearer/cookie auth happen by construction too: a
+# same-origin fetch('/api/auth/anonymous-token') in the tab returns the
+# user-scoped token (the cookies are right there), and we thread that bearer as
+# `X-Authorization-api` on subsequent in-tab fetches exactly as United's
+# frontend does. Template: apps/web/exa/exa.py, apps/dev/greptile/greptile.py.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# Readiness wait, prepended to every op body. A freshly opened tab is still at
+# about:blank when our JS first runs — a relative-URL fetch has no origin to
+# resolve against, and a same-origin request wouldn't carry the .united.com
+# cookies. We wait until the document has settled on a united.com origin before
+# the body runs. `__onApp` is False when United bounced an unauthenticated visit
+# to its sign-in host (the auth signal).
+_PRELUDE = """
+const __deadline = Date.now() + 15000;
+while (location.hostname.indexOf('united.com') === -1 || document.readyState !== 'complete') {
+  if (Date.now() > __deadline) return { __error: 'tab_not_ready' };
+  await new Promise(r => setTimeout(r, 200));
+}
+const __onApp = location.hostname.indexOf('united.com') !== -1
+  && location.pathname.indexOf('/account/sign-in') === -1
+  && location.hostname.indexOf('auth.') !== 0;
+"""
+
+
+async def _eval(body: str, *, timeout_s: int = 45):
+    """Run an op body inside the united.com tab in the engine-owned browser.
+
+    The engine matchmakes the ``browser_session`` provider, opens the tab (and
+    launches the browser) when needed, and returns the JS value. The body runs
+    only once the tab has settled on a united.com origin, with ``__onApp`` in
+    scope (False when United bounced us to its sign-in page — logged out).
+    """
+    return await services.call(services.browser_session, params={
+        "target": _UNITED,
+        "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
+        "timeout": timeout_s,
+    })
+
+
+async def _tab_request(method: str, url: str, *, json_body=None,
+                       headers=None, accept: str = "application/json") -> dict:
+    """One same-origin fetch() inside the united.com tab.
+
+    Returns ``{status, json, body, url}`` so op bodies can read ``resp["json"]``
+    / ``resp.get("body")`` / ``resp.get("status")`` exactly as they did against
+    the HTTP client. The cookies ride automatically because the fetch is
+    same-origin; the bearer is threaded by the caller via ``headers``.
+    """
+    opts = {"method": method.upper(), "credentials": "include", "cache": "no-store",
+            "headers": {"Accept": accept, **dict(headers or {})}}
+    if json_body is not None:
+        opts["headers"].setdefault("Content-Type", "application/json")
+        opts["body"] = _json.dumps(json_body)
+    full = url if url.startswith("http") else f"{_BASE}{url}"
+    return await _eval(f"""
+if (!__onApp) return {{ __error: 'session_expired' }};
+const r = await fetch({_json.dumps(full)}, {_json.dumps(opts)});
+const text = await r.text();
+let parsed = null;
+try {{ parsed = JSON.parse(text); }} catch (e) {{}}
+return {{ status: r.status, json: parsed, body: parsed ? '' : text, url: r.url }};
+""")
+
+
+def _check_tab(resp, *, what: str) -> dict:
+    """Translate a _tab_request return into a usable dict or raise SESSION_EXPIRED.
+
+    ``__error: session_expired`` (the tab bounced to United's sign-in) and
+    ``tab_not_ready`` both mean "no live session" — surface as SESSION_EXPIRED
+    so callers' check_session paths report unauthenticated cleanly.
+    """
+    if not isinstance(resp, dict):
+        raise RuntimeError(f"{what}: tab eval returned {resp!r}")
+    err = resp.get("__error")
+    if err in ("session_expired", "tab_not_ready"):
+        raise RuntimeError(
+            f"SESSION_EXPIRED: no live United session in the AgentOS browser "
+            f"profile ({what}). Sign in once headed at united.com."
+        )
+    if err:
+        raise RuntimeError(f"{what} failed in the tab: {err}")
+    return resp
+
+
+async def _mint_bearer() -> str | None:
+    """Mint a user-scoped bearer via /api/auth/anonymous-token in the tab.
+
+    Despite the name, this endpoint inspects the session cookies on the request
+    and returns a user-scoped token when they're valid. Run same-origin inside
+    the united.com tab, the cookies are present by construction, so a live
+    profile mints a user-scoped token. Returns None if anonymous or the mint
+    fails (or the tab has no live session).
+    """
+    resp = await _tab_request("GET", "/api/auth/anonymous-token")
+    if not isinstance(resp, dict) or resp.get("__error") or resp.get("status") != 200:
+        return None
+    data = (resp.get("json") or {}).get("data") or {}
+    return (data.get("token") or {}).get("hash")
+
+
+async def _authed_get(path: str, *, headers=None) -> dict:
+    """GET an authenticated API path. Mints the bearer in-tab, fetches same-origin."""
     bearer = await _mint_bearer()
     if not bearer:
-        raise RuntimeError("SESSION_EXPIRED: united.com cookies are stale or anonymous")
-    headers = {
-        "Accept": "application/json",
+        raise RuntimeError("SESSION_EXPIRED: united.com session is stale or anonymous")
+    hdrs = {
         "Accept-Language": "en-US",
         "X-Authorization-api": f"bearer {bearer}",
+        **dict(headers or {}),
     }
-    headers.update(kwargs.pop("headers", {}))
-    url = path if path.startswith("http") else f"{_BASE}{path}"
-    return await client.get(url, client="fetch", headers=headers, **kwargs)
+    return _check_tab(
+        await _tab_request("GET", path, headers=hdrs),
+        what=f"GET {path}")
 
 
-async def _authed_post(path: str, body=None, **kwargs) -> dict:
-    """POST an authenticated API path with JSON body."""
+async def _authed_post(path: str, body=None, *, headers=None) -> dict:
+    """POST an authenticated API path with JSON body, same-origin in the tab."""
     bearer = await _mint_bearer()
     if not bearer:
-        raise RuntimeError("SESSION_EXPIRED: united.com cookies are stale or anonymous")
-    headers = {
-        "Accept": "application/json",
+        raise RuntimeError("SESSION_EXPIRED: united.com session is stale or anonymous")
+    hdrs = {
         "Accept-Language": "en-US",
-        "Content-Type": "application/json",
         "X-Authorization-api": f"bearer {bearer}",
+        **dict(headers or {}),
     }
-    headers.update(kwargs.pop("headers", {}))
-    url = path if path.startswith("http") else f"{_BASE}{path}"
-    return await client.post(url, client="fetch", headers=headers, json=body, **kwargs)
+    return _check_tab(
+        await _tab_request("POST", path, json_body=body if body is not None else {},
+                           headers=hdrs),
+        what=f"POST {path}")
 
 
 # The United org node — reused as identity namespace for account / membership
@@ -380,144 +465,18 @@ def _elite_tier(traveler: dict) -> str | None:
 # ── tools ─────────────────────────────────────────────────────────────────────
 
 
-@returns("account")
-@connection("web")
-@timeout(30)
-async def store_session_cookies(*, cookies: dict, **params) -> dict:
-    """Store a dict of cookie name→value pairs as the engine's canonical
-    United session. Validates against /User/profile, then persists via
-    __secrets__ so future calls use these cookies regardless of what the
-    brave-browser provider's SQLite DB says.
+def _account_from_profile(data: dict) -> dict | None:
+    """Project a /User/profile payload onto the `account` shape, or None.
 
-    This is the recommended path when Brave's on-disk cookie DB is stale
-    relative to its in-memory state — the user is logged in in Brave, but
-    the app keeps reading an older snapshot. The agent grabs fresh
-    cookies via CDP (or pastes them from browser devtools) and hands them
-    to us.
-
-    Args:
-        cookies: Dict like {"AuthCookie": "...", "Session": "...", ...}.
-          Must include the auth-tier trio: AuthCookie, Session, User.
+    The user-scoped bearer + a 200 from /xapi/myunited/User/profile is the live
+    signal: a CustomerId/MileagePlusId means we're user-authenticated.
     """
-    if not cookies:
-        return app_result(error="cookies dict is required")
-
-    needed = {"AuthCookie", "Session", "User"}
-    missing = needed - set(cookies.keys())
-    if missing:
-        return app_result(error=f"missing required cookie(s): {sorted(missing)}")
-
-    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
-
-    # Mint a bearer using the caller-supplied cookies (not the engine's ambient jar).
-    mint = await client.get(
-        f"{_BASE}/api/auth/anonymous-token",
-        client="fetch",
-        cookies=cookie_header,
-    )
-    if mint.get("status") != 200:
-        return app_result(error=f"anonymous-token mint failed: status={mint.get('status')}")
-    bearer = ((mint.get("json") or {}).get("data") or {}).get("token", {}).get("hash")
-    if not bearer:
-        return app_result(error="anonymous-token mint returned no hash")
-
-    # Verify the bearer is user-scoped by hitting /User/profile
-    probe = await client.get(
-        f"{_BASE}/xapi/myunited/User/profile",
-        client="fetch",
-        cookies=cookie_header,
-        headers={
-            "Accept": "application/json",
-            "X-Authorization-api": f"bearer {bearer}",
-        },
-    )
-    if probe.get("status") != 200:
-        return app_result(
-            error=(f"cookies validated as anonymous, not user-scoped "
-                   f"(profile returned {probe.get('status')}). "
-                   f"These cookies don't represent a logged-in session.")
-        )
-
-    data = ((probe.get("json") or {}).get("data") or {})
-    prof = data.get("profile") or {}
+    prof = (data or {}).get("profile") or {}
     traveler = (prof.get("Travelers") or [{}])[0]
     mp_id = traveler.get("MileagePlusId") or ""
     customer_id = traveler.get("CustomerId") or prof.get("CustomerId")
-    display_name = traveler.get("CustomerName") or ""
-
-    if not mp_id:
-        return app_result(error="profile returned 200 but no MileagePlusId")
-
-    return {
-        "__secrets__": [app_secret(
-            domain=".united.com",
-            identifier=mp_id,
-            item_type="cookie",
-            value=cookies,
-            source="united",
-            label=f"United Session ({mp_id})",
-            metadata={"united": {"customerId": str(customer_id) if customer_id else None,
-                                 "displayName": display_name}},
-        )],
-        # Shape-conformant account for graph upsert (per check_session convention)
-        "id": f"united:{mp_id}",
-        "issuer": "united.com",
-        "identifier": mp_id,
-        "handle": mp_id,
-        "displayName": display_name,
-        "accountType": "mileageplus",
-        "isActive": True,
-        "at": {"shape": "airline", "name": "United Airlines",
-               "url": "https://www.united.com", "iataCode": "UA"},
-    }
-
-
-@returns("account")
-@connection("web")
-@timeout(30)
-async def check_session(**params) -> dict:
-    """Verify the United session is active.
-
-    Returns an account node with the logged-in MileagePlus identity, or
-    raises SESSION_EXPIRED if the cookies are stale.
-    """
-    bearer = await _mint_bearer()
-    if not bearer:
-        raise RuntimeError("SESSION_EXPIRED: no bearer could be minted")
-
-    # Don't trust /api/auth/validate-token — it returns {valid: false} for
-    # BOTH "actually expired" and "anonymously scoped" bearers. Since
-    # anonymous-token endpoint can return an anonymous bearer when cookies
-    # are too stale to mint a user-scoped token, validate-token can't
-    # distinguish. Instead, hit the real user endpoint: if /User/profile
-    # returns a CustomerId, we're user-authenticated. 403 = not.
-    resp = await client.get(
-        f"{_BASE}/xapi/myunited/User/profile",
-        client="fetch",
-        headers={
-            "Accept": "application/json",
-            "Accept-Language": "en-US",
-            "X-Authorization-api": f"bearer {bearer}",
-        },
-    )
-    status = resp.get("status")
-    if status == 403:
-        raise RuntimeError(
-            "SESSION_EXPIRED: United returned 403 on /User/profile. The bearer "
-            "is live but ANONYMOUSLY scoped (cookies present, server session "
-            "stale). Browser cookies need a flush — interact with united.com "
-            "in Brave (click a page that hits /xapi/), wait ~30s, retry. "
-            "If that fails, sign back in at "
-            "https://www.united.com/en/us/account/sign-in"
-        )
-    if status != 200:
-        raise RuntimeError(f"United profile call returned {status}: {resp.get('body', '')[:200]}")
-
-    data = ((resp.get("json") or {}).get("data") or {})
-    traveler = ((data.get("profile") or {}).get("Travelers") or [{}])[0]
-    mp_id = traveler.get("MileagePlusId") or ""
-    customer_id = traveler.get("CustomerId") or (data.get("profile") or {}).get("CustomerId")
-
+    if not (mp_id or customer_id):
+        return None
     return {
         "id": f"united:{mp_id or customer_id}",
         "issuer": "united.com",
@@ -531,8 +490,95 @@ async def check_session(**params) -> dict:
     }
 
 
+async def _live_account() -> dict | None:
+    """Read United's own profile endpoint in the tab → account dict, or None.
+
+    Mints the bearer in-tab and hits /xapi/myunited/User/profile same-origin.
+    A 403 means the bearer is live but anonymously scoped (cookies present,
+    server session stale) — treated as "no live session" like any other miss.
+    """
+    try:
+        resp = await _authed_get("/xapi/myunited/User/profile")
+    except RuntimeError:
+        return None
+    if resp.get("status") != 200:
+        return None
+    return _account_from_profile((resp.get("json") or {}).get("data") or {})
+
+
+@account.check
+@test.skip(reason='requires a live united.com session in the browser profile')
+@returns("account")
+@claims("primary_user")
+@connection("none")
+@timeout(60)
+async def check_session(**params) -> dict:
+    """Verify the United session and identify the logged-in MileagePlus account.
+
+    The session lives in the engine-owned browser profile; this op mints the
+    anonymous-token bearer and reads United's own ``/xapi/myunited/User/profile``
+    from inside the united.com tab. No cookie ever reaches the app.
+    """
+    acct = await _live_account()
+    if not acct:
+        return {"authenticated": False}
+    return {**acct, "authenticated": True}
+
+
+@account.login
+@returns("account | auth_challenge")
+@connection("none")
+@timeout(60)
+async def login(**params) -> dict:
+    """Report the live United session — or tell the user to sign in headed.
+
+    Returns the ``account`` when the browser profile already holds a live
+    united.com session. Otherwise returns a NeedsAuth ``app_error``: United's
+    sign-in is username+password+MFA fronted by Akamai bot-manager, with no
+    stable form shape to drive blind. The durable, safe move is for the human
+    to sign in once headed in the AgentOS browser; the session then lives in
+    the profile and every op rides it (the anti-bot challenge clears invisibly
+    because it's a real browser).
+    """
+    acct = await _live_account()
+    if acct:
+        return {**acct, "authenticated": True}
+    return app_error(
+        "No live United session in the AgentOS browser profile. Sign in once "
+        "headed at https://www.united.com/en/us/account/sign-in in the AgentOS "
+        "browser — United's login (username + password + MFA behind Akamai "
+        "bot-manager) is best cleared by a human, after which the session lives "
+        "in the profile and these ops just work.",
+        code="NeedsAuth",
+    )
+
+
+@account.logout
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(60)
+async def logout(**params) -> dict:
+    """Sign out of United in the browser profile.
+
+    Drives United's own sign-out same-origin in the united.com tab, then
+    reports the session cleared. Idempotent — a dead session is still a clean
+    logout.
+    """
+    await _eval("""
+if (!__onApp) return { ok: true, already: 'logged_out' };
+try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch (e) {}
+try { await fetch('/wallet/logout', { method: 'GET', credentials: 'include' }); } catch (e) {}
+return { ok: true };
+""")
+    return {
+        "status": "logged_out",
+        "hint": "Cleared the United session in the browser profile. Re-auth by "
+                "signing in headed at united.com.",
+    }
+
+
 @returns("person")
-@connection("web")
+@connection("none")
 @timeout(30)
 async def get_profile(**params) -> dict:
     """Fetch the logged-in user's full profile: legal name, MileagePlus,
@@ -607,7 +653,7 @@ async def get_profile(**params) -> dict:
     "primary_phone": "string",
     "primary_phone_country_code": "string",
 })
-@connection("web")
+@connection("none")
 @timeout(20)
 async def get_contact_info(**params) -> dict:
     """Fetch the logged-in user's saved contact info (phones, emails, KTN,
@@ -686,7 +732,7 @@ async def get_contact_info(**params) -> dict:
 
 
 @returns("membership")
-@connection("web")
+@connection("none")
 @timeout(30)
 async def get_mileageplus(**params) -> dict:
     """Fetch current MileagePlus membership with up-to-date miles balance,
@@ -902,7 +948,7 @@ def _itin_to_passengers(itin: dict) -> list[dict]:
 
 
 @returns("reservation[]")
-@connection("web")
+@connection("none")
 @timeout(45)
 async def list_trips(upcoming_only: bool = True, **params) -> list[dict]:
     """List upcoming United reservations for the logged-in MileagePlus user.
@@ -997,7 +1043,7 @@ async def list_trips(upcoming_only: bool = True, **params) -> list[dict]:
 
 
 @returns("reservation")
-@connection("web")
+@connection("none")
 @timeout(30)
 async def get_cart(*, cart_id: str, **params) -> dict:
     """Read the current state of an in-progress booking cart.
@@ -1215,7 +1261,7 @@ def _flight_to_trip(f: dict) -> dict:
 
 
 @returns("offer[]")
-@connection("web")
+@connection("none")
 @timeout(60)
 async def search_flights(
     origin: str,
@@ -1328,10 +1374,9 @@ async def search_flights(
             y, m, da = d.split("-")
             return f"{m}{da}{y}"
         try:
-            await client.post(
-                f"{_BASE}/api/FlexPricer/CalendarPricing",
-                client="fetch",
-                json={
+            await _tab_request(
+                "POST", "/api/FlexPricer/CalendarPricing",
+                json_body={
                     "UserSelected": True,
                     "Depart": _mmddyyyy(depart_date),
                     "Return": _mmddyyyy(return_date),
@@ -1349,8 +1394,6 @@ async def search_flights(
                     },
                 },
                 headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
                     "Referer": f"{_BASE}/en/us",
                     "X-Authorization-api": f"bearer {bearer}",
                 },
@@ -1392,18 +1435,19 @@ async def search_flights(
     # The endpoint streams SSE — we accept that the engine's HTTP client
     # may deliver the whole body at once (buffered) or line-by-line.
     # Either way, the body arrives as a single string we parse.
-    resp = await client.post(
-        f"{_BASE}/api/flight/FetchSSENestedFlights",
-        client="fetch",
-        json=body,
-        headers={
-            "Accept": "text/event-stream",
-            "Accept-Language": "en-US",
-            "Content-Type": "application/json",
-            "Referer": referer,
-            "X-Authorization-api": f"bearer {bearer}",
-        },
-    )
+    resp = _check_tab(
+        await _tab_request(
+            "POST", "/api/flight/FetchSSENestedFlights",
+            json_body=body,
+            accept="text/event-stream",
+            headers={
+                "Accept-Language": "en-US",
+                "Referer": referer,
+                "X-Authorization-api": f"bearer {bearer}",
+            },
+        ),
+        what="FetchSSENestedFlights")
+    # SSE arrives as a non-JSON string body; _tab_request leaves it in `body`.
     raw = resp.get("body") or ""
     if resp.get("status") not in (200, 201):
         raise RuntimeError(f"United flight search failed: status={resp.get('status')} body={raw[:400]}")
@@ -1515,7 +1559,7 @@ def _bbx_cell_id(booking_token: str, fare_family: str | None = None) -> str:
 
 
 @returns("reservation")
-@connection("web")
+@connection("none")
 @timeout(45)
 async def select_flight(
     *,
@@ -1664,7 +1708,7 @@ async def select_flight(
 
 
 @returns("reservation")
-@connection("web")
+@connection("none")
 @timeout(45)
 async def register_traveler(
     *,
@@ -1845,7 +1889,7 @@ async def register_traveler(
 
 
 @returns("seatmap")
-@connection("web")
+@connection("none")
 @timeout(45)
 async def get_seatmap(
     *,
@@ -2054,7 +2098,7 @@ async def get_seatmap(
 
 
 @returns("pass[]")
-@connection("web")
+@connection("none")
 @timeout(45)
 async def register_seats(
     *,
@@ -2293,7 +2337,7 @@ async def register_seats(
 
 
 @returns({"ascii": "string", "legend": "string"})
-@connection("web")
+@connection("none")
 @timeout(30)
 async def render_seatmap(
     *,
@@ -3192,7 +3236,7 @@ def _render_booking_review(
 
 
 @returns("booking_offer")
-@connection("web")
+@connection("none")
 @timeout(30)
 async def prepare_booking(
     *,
@@ -3436,7 +3480,7 @@ async def prepare_booking(
     "charged_amount": "number",
     "message": "string",
 })
-@connection("web")
+@connection("none")
 @timeout(60)
 async def confirm_booking(
     *,

@@ -14,19 +14,38 @@ product:
 
 # Amazon
 
-Search products, get details, and access your Amazon account. No API keys — uses Amazon's public autocomplete API and browser session cookies.
+Search products, get details, and access your Amazon account. No API keys.
 
-> **TODO — agent-driven login.** Today cold-start requires the user to
-> log into amazon.com in Brave manually so the cookie provider picks up
-> fresh cookies. A `login` tool mirroring ABP's pattern (1Password →
-> email+password → handshake → `__secrets__`) would close the cold-start
-> gap. Amazon's sign-in is a multi-step form POST with CSRF tokens
-> embedded in HTML between steps, plus TOTP on this account, so the
-> RE is more involved than ABP's Cognito single-handshake. Use
-> `agentos.browse.Session` (authoring-time CDP driver) + the
-> reverse-engineering app at `apps/agents/reverse-engineering/`
-> when picking this up. See `docs/apps/adding-login.md` for the
-> recipe and `_roadmap/p1/plan.md § What's left` for the status.
+Two halves, two substrates:
+
+- **Public** (`search_suggestions`, `search_products`, `get_product`) —
+  plain HTTP against Amazon's public autocomplete API + HTML pages. No
+  auth, no login.
+- **Account** (order history, lists, subscriptions, identity) —
+  **browser-driven**. Every op runs as a same-origin `fetch()` *inside*
+  a tab of the engine-owned browser (`www.amazon.com`) via the
+  `browser_session` service. The session **is** the browser profile —
+  Amazon's `.amazon.com` auth cookies, written by Amazon's own
+  Set-Cookie, never extracted, never vaulted, never seen by this app.
+  Requests originate from the real browser, so the live session, real
+  TLS fingerprint, and every anti-bot cookie ride by construction.
+
+The old cookie-vault transport is gone — and with it all the anti-bot
+gymnastics it needed to fake a browser (custom client hints, the
+`csd-key`/`csm-hit`/`aws-waf-token` strip, the homepage session-warming
+hop). The tab is already a warm, real session, so none of that is
+required. The same endpoint paths and the same lxml parsers are kept;
+only the transport changed.
+
+## Login — sign in once, headed
+
+Amazon's sign-in is email + password + frequent OTP/CAPTCHA, fronted by
+heavy anti-bot (Lightsaber), with no stable form to drive blind. So
+`login` does **not** attempt to drive it — it returns a NeedsAuth error
+telling you to **sign in once, headed, at amazon.com in the AgentOS
+browser**. After that the session lives in the browser profile and every
+account op rides it. `check_session` and `logout` are fully implemented
+against the tab.
 
 ## Features
 
@@ -41,8 +60,10 @@ Search products, get details, and access your Amazon account. No API keys — us
 - **`buy_again`** — Products Amazon recommends for repurchase. Returns ASIN, title, price, Prime eligibility.
 - **`subscriptions`** — Active Subscribe & Save subscriptions with delivery frequency, next delivery date, upcoming scheduled deliveries, edit deadlines, and total savings.
 
-### Account (requires session cookies)
-- **`check_session`** — Verify your Amazon session is active and identify the logged-in account. Returns display name, customer ID, marketplace, and Prime status.
+### Account (browser-driven)
+- **`check_session`** — Verify your Amazon session is active and identify the logged-in account. Returns display name, customer ID, marketplace, and Prime status. Reads the homepage + Login & Security pages inside the amazon.com tab.
+- **`login`** — Reports the live session, or returns NeedsAuth telling you to sign in once headed (Amazon OTP/CAPTCHA is best cleared by a human).
+- **`logout`** — Drives Amazon's own sign-out in the tab, clearing the session from the browser profile.
 
 ## Setup
 
@@ -52,11 +73,11 @@ Search products, get details, and access your Amazon account. No API keys — us
 
 `search_products` and `get_product` parse public Amazon pages. They work without login but may occasionally encounter CAPTCHAs under heavy use.
 
-### Authenticated Operations
+### Account Operations (browser-driven)
 
-1. Sign in to [amazon.com](https://www.amazon.com) in a browser whose cookies are visible to an installed cookie provider (Brave, Firefox, or Playwright)
-2. The engine obtains `.amazon.com` cookies automatically — the full cookie jar is passed, including the auth-tier tokens (`at-main`, `sess-at-main`, `sst-main`) needed for account pages
-3. Sessions last weeks to months
+1. Sign in to [amazon.com](https://www.amazon.com) **once, headed, in the AgentOS browser**. Amazon's login (email + password + OTP/CAPTCHA) is best cleared by a human.
+2. The session lands in the browser profile. Every account op runs same-origin inside that profile's amazon.com tab — nothing is extracted or vaulted.
+3. Sessions last weeks to months. When one expires, `check_session` reports `authenticated: false`; sign in headed again.
 
 ## Graph Model
 
@@ -118,38 +139,33 @@ run({ app: "amazon", tool: "buy_again" })
 run({ app: "amazon", tool: "subscriptions" })
 ```
 
-## Cookie Architecture
+## Session Architecture (browser-driven)
 
-Amazon uses tiered cookie-based authentication:
-
-| Cookie | Purpose | Required For |
-|--------|---------|-------------|
-| `session-id`, `session-token`, `ubid-main` | Basic session | Browsing, search |
-| `x-main` | "Remember me" persistence | Session continuity |
-| `at-main` (`Atza\|...`) | Authentication token | Account pages, orders |
-| `sess-at-main` | Session auth complement | Account pages, orders |
-| `sst-main` (`Sst1\|...`) | SSO state token | Cross-service auth |
-| `sso-state-main` (`Xdsso\|...`) | SSO state persistence | Cross-service auth |
-
-The app passes the cookie jar for `.amazon.com` with three cookies **excluded**: `csd-key`, `csm-hit`, and `aws-waf-token`. These trigger Amazon's Siege client-side decryption, rendering the HTML unparseable without JavaScript. All auth-tier tokens (`at-main`, `sess-at-main`, `sst-main`) are included.
+Amazon uses tiered cookie-based authentication (`session-id`, `at-main`,
+`sess-at-main`, `sst-main`, …). With the browser-driven transport, **the
+app never touches these cookies** — they live in the engine-owned browser
+profile and ride every `fetch()` automatically because the request is
+same-origin inside the amazon.com tab. There is no cookie jar to pass, no
+auth-tier tokens to select, and no `skip_cookies` filter: the real browser
+serves plain, parseable HTML to its own same-origin requests, so the old
+Siege client-side-encryption workaround (stripping `csd-key` / `csm-hit` /
+`aws-waf-token`) is no longer needed.
 
 ## Technical Details
 
 ### Anti-Bot Considerations
 
-- `search_suggestions` uses a separate domain (`completion.amazon.com`) with lighter bot detection
-- `search_products` and `get_product` navigate to the homepage first to establish a session before fetching target pages
-- Amazon's Lightsaber bot detection monitors client hints, session behavior, and fingerprinting
-- Recommended: 2-3 second delays between HTML scraping requests
-- If blocked, `search_suggestions` remains available as a reliable fallback
+- Account ops run inside a real browser tab, so Amazon's Lightsaber bot
+  detection sees a genuine session — no client-hint spoofing or
+  session-warming needed. The tab supplies the real fingerprint by
+  construction.
+- The public ops (`search_products`, `get_product`) still scrape HTML over
+  plain HTTP; `search_suggestions` uses the lighter `completion.amazon.com`
+  JSON API and remains the most reliable fallback if a scrape is blocked.
 
 ### Order History Page
 
-The order history page is **pure server-rendered HTML** — no hidden JSON or GraphQL API exists for orders. The page uses `.order-card` containers with `li.order-header__header-list-item` elements for date, total, ship-to, and order ID, plus `.yohtmlc-item` containers for product line items.
-
-**Siege encryption**: Amazon's `SiegeClientSideDecryption` encrypts order card contents when the `csd-key` cookie is present (signaling the client can decrypt via JS). The app strips `csd-key`, `csm-hit`, and `aws-waf-token` from the cookie jar to force Amazon to serve plain, parseable HTML. Without this, the order cards are empty JS blobs.
-
-**Selectors**: Amazon uses `<span dir="ltr">` (not `<bdi dir="ltr">`) for order IDs, and `li.order-header__header-list-item` for header fields. The `data-component` attributes from the amazon-orders library are not present in the HTML served to httpx clients.
+The order history page is **pure server-rendered HTML** — no hidden JSON or GraphQL API exists for orders. The page uses `.order-card` containers with `li.order-header__header-list-item` elements for date, total, ship-to, and order ID, plus `.yohtmlc-item` containers for product line items. The amazon.com tab fetches this HTML same-origin and the existing lxml parsers handle it unchanged.
 
 ### ASIN Format
 

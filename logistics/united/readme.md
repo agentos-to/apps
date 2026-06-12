@@ -22,8 +22,6 @@ test:
       origin: AUS
       destination: SFO
       depart_date: '2026-04-28'
-  store_session_cookies:
-    skip: true  # requires runtime cookie params; not auto-testable
   select_flight:
     skip: true  # requires a live cart_id from search_flights; destructive (mints held cart)
   register_traveler:
@@ -38,7 +36,15 @@ test:
 
 # United Airlines
 
-Flight search, booking, reservations, boarding passes, and MileagePlus account access via united.com session cookies.
+Flight search, booking, reservations, boarding passes, and MileagePlus
+account access. **Browser-driven**: every op runs as a same-origin
+`fetch()` inside a tab of the engine-owned browser via the
+`browser_session` service (the Exa/Greptile pattern). The session is the
+browser profile itself — United's auth + Akamai bot-manager cookies on
+`.united.com`, written by United's own Set-Cookie, never extracted, never
+vaulted. Requests originate from the real browser, so the live session and
+every anti-bot cookie ride by construction — which is exactly what defeats
+the bot-manager a cookie-replay transport has to fight.
 
 > **Before extending this app**, read:
 > 1. [Reverse Engineering overview](../../../platform/docs/src/content/docs/apps/reverse-engineering/overview.md)
@@ -72,7 +78,9 @@ Relationships:
 
 | Tool | What it does | Status |
 |---|---|---|
-| `check_session` | Verify cookies are live | ✅ |
+| `check_session` | Verify the browser-profile session is live (reads `/User/profile` in-tab) | ✅ |
+| `login` | Report the live session, or NeedsAuth (sign in once headed) | ✅ |
+| `logout` | Sign out of United in the browser profile | ✅ |
 | `get_profile` | Name, MP#, titles (person shape) | ✅ |
 | `get_contact_info` | Name, DOB, phones, emails, KTN, redress — the canonical source for booking-form prefill | ✅ |
 | `get_mileageplus` | Balance + elite tier | ✅ |
@@ -122,41 +130,18 @@ the full format contract.
 
 ## Setup
 
-Two paths:
+Sign in once, headed, in the engine-owned browser. Run `login` (or any
+op) — if there's no live session it returns a NeedsAuth error pointing
+you at <https://www.united.com/en/us/account/sign-in>. Complete the
+sign-in (username + password + MFA) by hand in that browser; United's
+Akamai bot-manager challenge clears invisibly because it's a real
+browser. The session then lives in the profile and every op rides it —
+nothing is extracted, nothing is vaulted, no cookie ever reaches the app.
 
-### 1. Brave cookie provider (zero-config, default)
-
-Log in to [united.com](https://www.united.com) in Brave. The engine's
-`brave-browser` provider extracts cookies from Brave's encrypted SQLite
-DB. **Caveat:** Brave buffers cookie writes to disk and only flushes
-periodically — immediately after a fresh login, the app may see stale
-cookies for up to ~5 minutes until Brave flushes. If `check_session`
-returns SESSION_EXPIRED while you're clearly logged in in Brave, either
-wait ~5 min or fully quit (Cmd+Q) and reopen Brave to force a flush.
-
-### 2. `store_session_cookies` (bypasses Brave's stale DB)
-
-For when you want the app to use cookies independent of Brave's disk
-state — e.g. you just logged in and don't want to wait. The agent grabs
-live cookies (from CDP, the browser devtools Network tab, or any other
-source) and passes them in:
-
-```js
-run({ app: "united", tool: "store_session_cookies", params: {
-  cookies: {
-    AuthCookie: "…", Session: "…", User: "…",
-    "PIM-SESSION-ID": "…", _ucid: "…", "1pc_session": "…",
-    // …plus any Akamai bm_*, _abck, ak_bmsc cookies
-  }
-}});
-```
-
-The app validates these against `/xapi/myunited/User/profile` (so we
-know the cookies represent a real logged-in session, not an anonymous
-visit) and persists them to the engine's credential store via
-`__secrets__`. Because the engine resolves cookies by newest-timestamp
-across all providers, these fresh cookies now beat Brave's stale DB on
-every subsequent call.
+`check_session` confirms the live session by minting the anonymous-token
+bearer in-tab and reading `/xapi/myunited/User/profile` same-origin. It
+returns `{authenticated: false}` (not an error) when there's no live
+session.
 
 ## Cart lifecycle (read before resuming any booking)
 
@@ -266,10 +251,20 @@ via a separate co-brand apply flow.
 
 ## Transport
 
-Cookie auth against `.united.com`. Endpoint inventory lives in [requirements.md](./requirements.md).
+Browser-driven: every op is a same-origin `fetch()` evaluated inside the
+united.com tab of the engine-owned browser via the `browser_session`
+service. Ops bind to `@connection("none")` — there is no credential to
+ride; the session is the browser profile. The `X-Authorization-api`
+bearer is minted in-tab via `/api/auth/anonymous-token` (user-scoped
+because the cookies are present by construction) and threaded on each
+authed request exactly as United's frontend does. SSE endpoints
+(`FetchSSENestedFlights`) come back as a non-JSON string body the op
+parses. Endpoint inventory lives in [requirements.md](./requirements.md).
 
 ## Reverse engineering notes
 
-See [requirements.md](./requirements.md) for captured endpoints and auth details.
-
-Session warming may be needed (United likely uses session-based CSRF tokens and progressive enhancement). TBD after CDP capture.
+See [requirements.md](./requirements.md) for captured endpoints and auth
+details. Because requests now originate from the real browser tab, the
+anti-bot / fingerprint apparatus the cookie-replay transport fought
+(custom UA, Sec-* spoofing, http2 flags, hand-assembled cookie headers)
+is gone — the tab supplies all of it.
