@@ -63,7 +63,11 @@ on-disk state under `~/.claude/projects/`.
 > the `api` and `web` connections (for the Anthropic API model list and
 > claude.ai web chats, respectively).
 
-### `web` connection — claude.ai chat history
+### `web` connection — claude.ai chat history (browser-driven)
+
+Every op runs same-origin `fetch()` inside a claude.ai tab of the engine-owned
+browser (the Exa pattern). The session is the profile's `sessionKey` cookie —
+never extracted, never vaulted.
 
 | Tool | Description |
 |---|---|
@@ -72,8 +76,10 @@ on-disk state under `~/.claude/projects/`.
 | `search_conversations` | Search by title (client-side filter) |
 | `import_conversation` | Import messages into graph for FTS |
 | `list_orgs` | Discover orgs and capabilities |
-| `check_session` | Verify cookies are valid, return identity |
-| `extract_magic_link` | Parse magic link from raw email (used during login) |
+| `check_session` | Ask /api/organizations in the tab, return identity |
+| `login` | Drive the email form → magic-link `auth_challenge` |
+| `verify_login` | Navigate the magic-link URL in the tab to finish login |
+| `logout` | POST claude.ai signout in the tab |
 
 ## Setup
 
@@ -91,5 +97,7 @@ Works with Pro/Max/Team/Enterprise subscriptions. Once logged in, `claude_code.p
 uses that auth state directly — no key exchange with agentOS.
 
 ### `web` connection
-No setup needed if you're logged in to claude.ai in a supported browser (Brave/Firefox).
-Cookie provider matchmaking extracts `sessionKey` automatically.
+Browser-driven — sign in to claude.ai once in the AgentOS browser profile, or
+run `claude.login` (drives the email form, returns a magic-link `auth_challenge`;
+read the link from your inbox and call `verify_login`). No credential is stored;
+the session is the browser profile itself.

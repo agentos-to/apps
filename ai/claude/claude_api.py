@@ -16,15 +16,11 @@ connection(
 
 connection(
     'web',
-    description='claude.ai — web chat history via session cookies',
-    client='fetch',
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # claude.ai tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py. The inline magic-link
-    # login flow below is dead too — re-express it as browser-driven login.
-    auth={'type': 'cookies', 'domain': '.claude.ai', 'names': ['sessionKey'], 'account': {'check': 'check_session'}, 'login': {'account_prompt': 'What email do you use for claude.ai?', 'phases': [{'name': 'request_login', 'description': 'Submit email on the Claude login page to trigger a magic link email', 'steps': [{'action': 'goto', 'url': 'https://claude.ai/login'}, {'action': 'fill', 'selector': 'input[type=email]', 'value': '${ACCOUNT}'}, {'action': 'click', 'selector': 'button[type=submit]'}], 'returns_to_agent': "Magic link requested. Check the user's email for a message from Anthropic\ncontaining a claude.ai/magic-link URL. Search mail or the graph for that message,\nor ask the user to paste the link.\n"}, {'name': 'complete_login', 'description': 'Navigate to the magic link URL to complete authentication', 'requires': ['magic_link'], 'steps': [{'action': 'goto', 'url': '${MAGIC_LINK}'}, {'action': 'wait', 'url_contains': '/new'}], 'returns_to_agent': 'Login complete. The sessionKey cookie is now in the browser.\nCookie provider matchmaking will extract it automatically on the next API call.\n'}]}})
+    description="claude.ai — web chat history. Browser-driven (no credential): "
+                "the session IS the engine-owned browser profile's sessionKey "
+                "cookie. Ops live in claude_web.py and run same-origin fetch() "
+                "inside the claude.ai tab, bound to @connection(\"none\"). "
+                "Sign in once headed, or run claude.login (magic-link flow).")
 
 
 API_BASE = "https://api.anthropic.com/v1"

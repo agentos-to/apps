@@ -1,75 +1,117 @@
 #!/usr/bin/env python3
 """
-claude_web.py — claude.ai private API client (web connection of ai/claude)
+claude_web.py — claude.ai private API client, browser-driven.
 
-Session cookies ride via the ``web`` connection's ambient Jar (seeded
-from a logged-in browser's ``sessionKey`` cookie). The connection is
-``client="fetch"`` so XHR-style Sec-Fetch-* and Sec-CH-UA* come for
-free; the app adds only the claude.ai-specific ``anthropic-client-
-version`` header and forces HTTP/1.1 (Cloudflare blocks HTTP/2).
+Every op runs same-origin ``fetch()`` *inside a claude.ai tab of the
+engine-owned browser* via the ``browser_session`` service (the Exa
+pattern). The session is the browser profile itself — the ``sessionKey``
+cookie on ``.claude.ai``, written by claude.ai's own login flow, never
+extracted, never vaulted, never seen by this app. Because the request
+originates from the real browser tab it carries the live session and
+clears Cloudflare by construction — exactly the call the React app makes.
+
+Login is magic-link: ``login`` drives the email form at claude.ai/login
+and returns an ``auth_challenge``; the agent reads the magic-link URL from
+the account's inbox by judgment and calls ``verify_login`` to navigate it
+in the tab.
 """
 
-import base64
+import json
 import re
 
-from agentos import claims, client, connection, provides, returns, test, timeout, web_read
+from agentos import account, app_error, claims, connection, credentials, normalize_email, provides, returns, services, test, timeout, web_read
 
 BASE_URL = "https://claude.ai"
 
-# App-specific headers merged on top of the fetch-bundle the connection
-# supplies. Brave's UA identity (v="146") since that's the browser with
-# the cookies.
-_CLAUDE_HEADERS = {
-    "anthropic-client-version": "claude-ai/web@1.1.5368",
-    "Sec-CH-UA": '"Chromium";v="146", "Brave";v="146", "Not-A.Brand";v="99"',
+# browser_session target — a URL substring; the engine opens
+# https://<target>/ in the engine-owned browser when no tab matches.
+_TARGET = "claude.ai"
+
+# claude.ai ships its frontend build id in this header; same-origin GETs
+# don't strictly require it, but we send it to match the React app's calls.
+_CLIENT_VERSION = "claude-ai/web@1.1.5368"
+
+# Readiness wait prepended to every op body — a freshly opened tab is at
+# about:blank when our JS first runs, so a relative-URL fetch has no origin
+# to resolve against. Wait until the document settles on a claude.ai origin.
+# `__loggedOut` is true when claude.ai parked us on its /login page (the
+# auth signal for a missing session).
+_PRELUDE = """
+const __deadline = Date.now() + 15000;
+while (location.hostname.indexOf('claude.ai') === -1 || document.readyState !== 'complete') {
+  if (Date.now() > __deadline) return { __error: 'tab_not_ready' };
+  await new Promise(r => setTimeout(r, 200));
 }
-
-# claude.ai's Cloudflare config blocks HTTP/2 clients — all requests
-# must force HTTP/1.1. Per-call flag on client.get/post; applied via
-# the _get/_post helpers below.
-_H1_FLAG = {"http2": False}
+const __loggedOut = location.pathname.indexOf('/login') === 0
+  || location.pathname.indexOf('/magic-link') === 0;
+"""
 
 
-async def _get(u, **kwargs):
-    """client.get with claude.ai's fixed headers + http2=False."""
-    headers = {**_CLAUDE_HEADERS, **(kwargs.pop("headers", None) or {})}
-    return await client.get(u, headers=headers, http2=False, **kwargs)
+async def _eval(body: str, *, timeout_s: int = 45):
+    """Run an op body inside the claude.ai tab in the engine-owned browser."""
+    return await services.call(services.browser_session, params={
+        "target": _TARGET,
+        "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
+        "timeout": timeout_s,
+    })
 
 
-async def _post(u, **kwargs):
-    headers = {**_CLAUDE_HEADERS, **(kwargs.pop("headers", None) or {})}
-    return await client.post(u, headers=headers, http2=False, **kwargs)
+async def _api(method: str, path: str, *, json_body: dict | None = None,
+               timeout_s: int = 45) -> dict:
+    """One same-origin fetch inside the tab. Returns {status, json}.
+
+    Carries the sessionKey cookie because it's same-origin; sends the
+    claude.ai client-version header the React app sends.
+    """
+    opts = {
+        "method": method,
+        "cache": "no-store",
+        "headers": {"anthropic-client-version": _CLIENT_VERSION},
+    }
+    if json_body is not None:
+        opts["headers"]["Content-Type"] = "application/json"
+        opts["body"] = json.dumps(json_body)
+    value = await _eval(f"""
+if (__loggedOut) return {{ __loggedOut: true }};
+const r = await fetch({json.dumps(path)}, {json.dumps(opts)});
+let body = null;
+try {{ body = await r.json(); }} catch (e) {{}}
+return {{ status: r.status, json: body }};
+""", timeout_s=timeout_s)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"claude.ai tab eval returned {value!r}")
+    if value.get("__loggedOut"):
+        raise RuntimeError(
+            "SESSION_EXPIRED: no live claude.ai session in the AgentOS browser "
+            "profile — run claude.login or sign in once headed."
+        )
+    if value.get("__error"):
+        raise RuntimeError(f"claude.ai fetch failed in the tab: {value['__error']}")
+    return value
 
 
 # -- API operations ------------------------------------------------------------
 
 
 async def _get_organizations():
-    resp = await _get(f"{BASE_URL}/api/organizations")
-    data = resp["json"]
-    # API returns a list of org dicts on success, or an error dict on failure
+    resp = await _api("GET", "/api/organizations")
+    data = resp.get("json")
     if isinstance(data, dict) and "error" in data:
         err = data["error"]
         code = err.get("details", {}).get("error_code", "") if isinstance(err, dict) else ""
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         if "session_invalid" in code or "authorization" in msg.lower():
-            raise RuntimeError(f"SESSION_EXPIRED: Claude session is invalid — re-login at claude.ai")
+            raise RuntimeError("SESSION_EXPIRED: Claude session is invalid — re-login at claude.ai")
         raise RuntimeError(f"Claude API error: {msg}")
     if not isinstance(data, list):
-        raise RuntimeError(f"Unexpected orgs response type: {type(data).__name__}")
+        raise RuntimeError(f"Unexpected orgs response (status {resp.get('status')}): {type(data).__name__}")
     return data
 
 
 async def _resolve_org_uuid(org_uuid=None):
-    """Resolve the org UUID for chat operations.
-
-    Priority: explicit org_uuid > /api/organizations. (The former
-    lastActiveOrg-cookie fast path is gone — cookie auth is retired and
-    the SDK no longer exposes an ambient Jar to read it from.)
-    """
+    """Resolve the org UUID for chat operations — explicit, else first chat-capable."""
     if org_uuid:
         return org_uuid
-    # Fetch all orgs, find chat-capable one.
     orgs = await _get_organizations()
     for org in orgs:
         if "chat" in org.get("capabilities", []):
@@ -81,10 +123,10 @@ async def _resolve_org_uuid(org_uuid=None):
 
 async def _get_conversations(org_uuid, limit=50, offset=0):
     path = f"/api/organizations/{org_uuid}/chat_conversations?limit={limit}&offset={offset}"
-    resp = await _get(f"{BASE_URL}{path}")
+    resp = await _api("GET", path)
     if resp.get("status", 0) >= 400:
-        raise RuntimeError(f"Conversations API returned {resp.get('status')}: {resp.get('body', resp.get('json', ''))}")
-    return resp["json"]
+        raise RuntimeError(f"Conversations API returned {resp.get('status')}: {resp.get('json')}")
+    return resp.get("json")
 
 
 async def _get_conversation(org_uuid, conv_uuid):
@@ -92,8 +134,8 @@ async def _get_conversation(org_uuid, conv_uuid):
         f"/api/organizations/{org_uuid}/chat_conversations/{conv_uuid}"
         "?tree=True&rendering_mode=messages&render_all_tools=true"
     )
-    resp = await _get(f"{BASE_URL}{path}")
-    return resp["json"]
+    resp = await _api("GET", path)
+    return resp.get("json")
 
 
 # -- Formatting helpers --------------------------------------------------------
@@ -145,9 +187,11 @@ def _format_conversation(conv, org_uuid):
     }
 
 
-# -- Operation entrypoints — called by the python: executor with auto-dispatch --
+# -- Operation entrypoints -----------------------------------------------------
 
 @returns("conversation[]")
+@connection("none")
+@timeout(45)
 async def list_conversations(*, org=None, limit=50, offset=0, **params) -> list:
     """List claude.ai web chat conversations, most recently updated first. Requires a valid session (run login flow if needed).
 
@@ -165,6 +209,8 @@ async def list_conversations(*, org=None, limit=50, offset=0, **params) -> list:
 
 @returns("conversation")
 @provides(web_read, urls=["claude.ai/chat/*", "www.claude.ai/chat/*"])
+@connection("none")
+@timeout(45)
 async def get_conversation(*, id=None, url=None, org=None, **params) -> dict:
     """Get a full claude.ai web conversation with all messages. Returns the complete message history including both human and assistant turns.
 
@@ -186,6 +232,8 @@ async def get_conversation(*, id=None, url=None, org=None, **params) -> dict:
 
 
 @returns("conversation[]")
+@connection("none")
+@timeout(60)
 async def search_conversations(*, query="", org=None, limit=20, **params) -> list:
     """Search claude.ai web conversations by title/name. Fetches up to 250 conversations and filters locally (no server-side search). For full content search across message text, use import_conversation first, then search({ query: "...", types: ["message"] }) against the graph FTS index.
 
@@ -218,7 +266,8 @@ async def search_conversations(*, query="", org=None, limit=20, **params) -> lis
 
 
 @returns("message[]")
-@timeout(60)
+@connection("none")
+@timeout(90)
 async def import_conversation(*, org=None, limit=5, offset=0, **params) -> list:
     """Import claude.ai conversations and all their messages into the graph. Each message becomes a message entity with full content FTS-indexed. After import, use search({ query: "...", types: ["message"] }) for content search. Safe to run repeatedly — deduplicates by message UUID. Use limit+offset to page through conversations in batches of 5-10.
 
@@ -263,13 +312,14 @@ async def import_conversation(*, org=None, limit=5, offset=0, **params) -> list:
 
 
 @returns({"uuid": "string", "name": "string", "capabilities": "array"})
-@timeout(15)
+@connection("none")
+@timeout(30)
 async def list_orgs(**params) -> list:
     """List all organizations the user has access to. Returns org UUIDs, names, and capabilities. Use this to discover which org has chat history (look for "chat" in capabilities)."""
     return await _get_organizations()
 
 
-# -- Session check — called by account.check with auto-dispatch ----------------
+# -- The account trio — browser-driven -----------------------------------------
 
 _CLAUDE_AI = {"shape": "product", "url": "https://claude.ai", "name": "Claude.ai"}
 
@@ -288,27 +338,15 @@ def _pick_identity(orgs: list) -> tuple[str, str] | None:
     return None
 
 
-@test.skip(reason='destructive or unsupported — migrated from yaml')
-@returns("account")
-@claims("primary_user")
-@connection("web")
-async def check_session(**params) -> dict:
-    """Verify Claude.ai session and identify the logged-in account.
-
-    Validates operational access by resolving the chat org (probes
-    ``lastActiveOrg`` cookie if available), then fetches identity from
-    ``/api/organizations``. Cookies come from the ambient Jar seeded by
-    the ``web`` connection.
-    """
+async def _account_from_orgs() -> dict | None:
+    """Resolve identity from /api/organizations, or None if logged out."""
     try:
-        await _resolve_org_uuid()
         orgs = await _get_organizations()
     except Exception:
-        return {"authenticated": False}
-
+        return None
     picked = _pick_identity(orgs)
     if not picked:
-        return {"authenticated": False}
+        return None
     identifier, display = picked
     return {
         "authenticated": True,
@@ -318,44 +356,201 @@ async def check_session(**params) -> dict:
     }
 
 
-# -- Magic link extraction — pure string parsing, no browser needed ------------
+@account.check
+@test.skip(reason='requires a live browser session')
+@returns("account")
+@claims("primary_user")
+@connection("none")
+@timeout(45)
+async def check_session(**params) -> dict:
+    """Verify the Claude.ai session and identify the logged-in account.
 
-def _extract_magic_link_from_raw_email(raw_b64: str) -> str | None:
-    """Extract the claude.ai magic link from a raw RFC 2822 email (base64url-encoded)."""
-    raw_bytes = base64.urlsafe_b64decode(raw_b64 + "==")
-    raw_str = raw_bytes.decode("utf-8", errors="replace")
-
-    cleaned = re.sub(r'=\r?\n', '', raw_str)
-    qp_pattern = r'href=3D"(https://claude\.ai/magic-link#[^"\s]+)'
-    match = re.search(qp_pattern, cleaned, re.IGNORECASE)
-    if match:
-        u = match.group(1)
-        return url.replace('=3D', '=').replace('=3d', '=')
-
-    import quopri
-    for part in raw_str.split('--'):
-        if 'content-transfer-encoding: quoted-printable' in part.lower():
-            try:
-                body = quopri.decodestring(part.encode('utf-8', errors='replace')).decode('utf-8', errors='replace')
-                m = re.search(r'href="(https://claude\.ai/magic-link#[^"]+)"', body, re.IGNORECASE)
-                if m:
-                    return m.group(1)
-            except Exception:
-                pass
-    return None
+    The session lives in the engine-owned browser profile; this op asks
+    /api/organizations from inside the claude.ai tab. No cookie reaches the app.
+    """
+    acct = await _account_from_orgs()
+    return acct or {"authenticated": False}
 
 
-@returns({"magicLink": "string"})
-@timeout(10)
-async def extract_magic_link(raw_email: str, **params) -> dict:
-    """Extract the magic link URL from a raw base64url-encoded email body. Pass the raw RFC 2822 email body (e.g. from whichever integration exposes raw message bytes) and this will decode it and find the claude.ai magic link.
+# React-safe value set — the native setter + input/change events.
+_REACT_SET = """
+const __setVal = (el, v) => {
+  const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  s.call(el, v);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+};
+"""
 
-        Args:
-            raw_email: Base64url-encoded raw RFC 2822 email content
-        """
-    link = _extract_magic_link_from_raw_email(raw_email)
-    if link:
-        return {"magicLink": link}
-    return {"error": "No magic link found in raw email content"}
+# Get the tab onto the login form, then drive the email field + submit to
+# trigger the magic-link email. Navigation to /login kills this eval's
+# context, so we navigate and bail, letting the next eval's prelude wait.
+_GOTO_LOGIN_JS = """
+if (location.pathname.indexOf('/login') === 0
+    && document.querySelector('input[type=email]')) return { ready: true };
+location.replace('https://claude.ai/login');
+return { navigating: true };
+"""
+
+_REQUEST_LINK_JS = _REACT_SET + """
+let emailInp = null;
+const d1 = Date.now() + 15000;
+while (Date.now() < d1) {
+  emailInp = document.querySelector('input[type=email]');
+  if (emailInp) break;
+  await new Promise(r => setTimeout(r, 300));
+}
+if (!emailInp) return { __error: 'login email field never appeared' };
+__setVal(emailInp, %(email)s);
+await new Promise(r => setTimeout(r, 400));
+const btn = [...document.querySelectorAll('button')].find(b =>
+  /continue with email|continue|log in|sign in/i.test(b.textContent.trim()));
+if (!btn) return { __error: 'no continue button on the login form' };
+for (let i = 0; i < 20 && btn.disabled; i++) await new Promise(r => setTimeout(r, 500));
+btn.click();
+const d2 = Date.now() + 20000;
+while (Date.now() < d2) {
+  if (/check your (email|inbox)|we sent|verification|sent you a/i.test(document.body.innerText)) {
+    return { sent: true };
+  }
+  await new Promise(r => setTimeout(r, 400));
+}
+return { __error: 'no "check your email" confirmation after submitting' };
+"""
 
 
+@account.login
+@returns("account | auth_challenge")
+@connection("none")
+@timeout(90)
+async def login(*, email: str = "", **params) -> dict:
+    """Sign in to claude.ai — or report the already-live session.
+
+    Returns the `account` when the browser profile holds a live session.
+    Otherwise drives the email form at claude.ai/login to request a
+    magic-link email and returns an `auth_challenge` (kind: magic_link)
+    whose `continueWith` is verify_login.
+
+    Args:
+        email: Address to sign in as. Optional — resolved from stored
+            credentials (1Password, Keychain, vault) when omitted.
+    """
+    acct = await _account_from_orgs()
+    if acct:
+        return acct
+
+    if not email:
+        creds = await credentials.retrieve(domain=".claude.ai", required=["email"])
+        if creds.get("found"):
+            email = (creds.get("value") or {}).get("email") or creds.get("identifier") or ""
+    if not email:
+        return app_error(
+            "No email to sign in as.",
+            code="NeedsCredentials",
+            required=["email"],
+            hint="Pass `email`, or store a claude.ai item in a login_credentials provider.",
+        )
+    email = normalize_email(email)
+
+    nav = await _eval(_GOTO_LOGIN_JS)
+    if isinstance(nav, dict) and nav.get("__error"):
+        return app_error(f"Reaching the login form failed: {nav['__error']}",
+                         code="SigninFailed")
+
+    value = await _eval(_REQUEST_LINK_JS % {"email": json.dumps(email)}, timeout_s=60)
+    if not isinstance(value, dict) or value.get("__error"):
+        detail = value.get("__error") if isinstance(value, dict) else value
+        return app_error(
+            f"Requesting the claude.ai magic link failed: {detail}. The login "
+            "page shape may have changed — re-inspect the form.",
+            code="SigninFailed",
+        )
+
+    return {
+        "name": "Claude.ai sign-in link",
+        "kind": "magic_link",
+        "payload": email,
+        "artifact": f"Magic-link sign-in email sent to {email}.",
+        # Self-serve hint for an agent with email access — where to look,
+        # NOT how to parse. The agent reads the message, confirms it's a
+        # genuine Anthropic claude.ai sign-in, and extracts the magic-link
+        # URL with judgment (no regex — judgment also catches a phishing
+        # look-alike a pattern would blindly trust).
+        "retrieval": {
+            "via": "email",
+            "deliveredTo": email,
+            "sender": "Anthropic (claude.ai)",
+            "subjectHint": "Sign in to Claude / your login link",
+            "look_for": "a https://claude.ai/magic-link#… URL in the body",
+        },
+        "instructions": (
+            f"Read the sign-in email Anthropic just sent to {email}. Confirm "
+            "it's genuine and recent, copy the https://claude.ai/magic-link#… "
+            "URL from the body, then call verify_login(magic_link=<that URL>). "
+            "Only ask the human if the message isn't there."
+        ),
+        "continueWith": "verify_login",
+    }
+
+
+@returns("account")
+@claims("primary_user")
+@connection("none")
+@timeout(60)
+async def verify_login(*, magic_link: str, **params) -> dict:
+    """Complete claude.ai login by navigating the magic-link URL in the tab.
+
+    Navigating the link lands the sessionKey cookie in the browser profile
+    through claude.ai's own flow — nothing extracted or vaulted. Confirms by
+    reading identity back from /api/organizations.
+
+    Args:
+        magic_link: The https://claude.ai/magic-link#… URL from the sign-in email.
+    """
+    if not magic_link or "claude.ai/magic-link" not in magic_link:
+        return app_error(
+            "magic_link must be a https://claude.ai/magic-link#… URL from the "
+            "sign-in email.", code="BadParams")
+
+    # Navigate the tab to the magic link; this eval's context dies on
+    # navigation, so just kick it off.
+    await _eval(f"location.replace({json.dumps(magic_link)});\nreturn {{ navigating: true }};")
+
+    # Poll for the session to settle (the next eval's prelude waits for the
+    # post-redirect page to finish loading).
+    for _ in range(8):
+        acct = await _account_from_orgs()
+        if acct:
+            return acct
+    return app_error(
+        "Navigated the magic link but no live session followed — the link may "
+        "be expired. Request a fresh one with login and retry.",
+        code="VerifyFailed",
+    )
+
+
+@account.logout
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(45)
+async def logout(**params) -> dict:
+    """Sign out of claude.ai — clears the session from the browser profile.
+
+    POSTs claude.ai's logout endpoint same-origin in the tab; the response's
+    Set-Cookie clears the sessionKey. Idempotent.
+    """
+    value = await _eval("""
+if (__loggedOut) return { ok: true, already: 'logged_out' };
+const r = await fetch('/api/auth/logout', { method: 'POST', cache: 'no-store' });
+return { ok: r.ok, status: r.status };
+""")
+    if not isinstance(value, dict) or value.get("__error"):
+        return app_error(
+            f"Signout failed in the claude.ai tab: "
+            f"{value.get('__error') if isinstance(value, dict) else value}",
+            code="LogoutFailed",
+        )
+    return {
+        "status": "logged_out",
+        "hint": "sessionKey cleared from the browser profile by claude.ai's Set-Cookie.",
+    }
