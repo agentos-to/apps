@@ -21,26 +21,36 @@ AI code review and codebase search. This app manages **organization membership**
 
 ## Setup
 
-1. Log into https://app.greptile.com in Brave.
-2. The engine auto-resolves cookies from Brave for `app.greptile.com`.
-3. `run({app:"greptile", tool:"check_session"})` should return `{authenticated: true, ...}`.
+This app is **browser-driven**: every op runs same-origin `fetch()` inside a
+tab of the engine-owned browser (the Exa pattern). The session is the browser
+profile — nothing is extracted or vaulted.
+
+1. Log into https://app.greptile.com once in the AgentOS browser profile.
+2. `run({app:"greptile", tool:"check_session"})` returns `{authenticated: true, ...}`.
+
+`login` can also drive the sign-in autonomously: it fills the email+password
+form at `auth.greptile.com` with credentials from a `login_credentials`
+provider (1Password / Keychain / vault). OAuth-only accounts (GitHub / GitLab
+/ Google) have no password — sign those in once headed instead.
 
 ## Auth architecture
 
-Greptile uses **Auth.js v5** (the rebrand of NextAuth) on `app.greptile.com`.
+Greptile's dashboard (`app.greptile.com`) uses **Auth.js v5** (the rebrand of
+NextAuth), fronted by an OAuth login service at `auth.greptile.com`: an
+unauthenticated visit redirects to
+`auth.greptile.com/login?login_challenge=…` — an email+password form plus
+GitHub/GitLab/Google buttons. The session lands in
+`__Secure-authjs.session-token` on `app.greptile.com`; both hosts share one
+`greptile.com` browser tab, and the op prelude branches on which host the tab
+settled on (`__onApp`) as the live auth signal.
 
-| Cookie | Domain | Purpose |
-|--------|--------|---------|
-| `__Host-authjs.csrf-token` | app.greptile.com | CSRF double-submit (value is `token%7Chash`) |
-| `__Secure-authjs.callback-url` | app.greptile.com | Post-auth redirect target |
-| `__Secure-authjs.session-token` | app.greptile.com | **The session JWT (JWE)** — the one that matters |
-| `greptile_logged_in` | .greptile.com | Marketing-side flag |
-
-For authenticated dashboard API calls you only need `__Secure-authjs.session-token`.
+The session response also carries a `greptileToken` (short-lived Bearer JWT)
+for the backend at `api.greptile.com` — `backend_probe` calls it cross-origin
+from the app tab, exactly as the real frontend does.
 
 ## People / Org API (reverse-engineered)
 
-The organization settings page is a Next.js SPA at `/settings/organization/people`. It uses **tRPC** under the hood — every mutation/query goes through `/api/trpc/<procedure>` on `app.greptile.com`.
+The organization settings page is a Next.js SPA at `/settings/organization/people`. It uses **tRPC** under the hood — every mutation/query goes through `/api/trpc/<procedure>` on `app.greptile.com`, run same-origin inside the tab.
 
 - GET (queries): `/api/trpc/<procedure>?input=<urlencoded {"json":<args>}>`
 - POST (mutations): `/api/trpc/<procedure>` with body `{"json":<args>}`
@@ -79,4 +89,5 @@ There is also a separate backend at `https://api.greptile.com` (Express, Bearer 
 - `revoke_invite` — revoke a single pending email invite.
 - `update_role` — change a member's role (ADMIN / MEMBER).
 - `remove_member` — remove a member from the org.
-- `probe`, `backend_probe`, `grep_bundle`, `grep_page_chunks`, `inspect_auth` — reverse-engineering helpers. Leave in place while the API is still being mapped; don't ship them in a "stable" app.
+- `login` / `logout` — drive the auth.greptile.com form / Auth.js signout in the tab.
+- `probe`, `backend_probe` — reverse-engineering helpers (same-origin app fetch / cross-origin backend with the greptileToken). Leave in place while the API is still being mapped; don't ship them in a "stable" app.

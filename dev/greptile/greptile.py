@@ -3,51 +3,33 @@
 Auth architecture
 -----------------
 Greptile's dashboard (app.greptile.com) uses **Auth.js v5** (the rebrand of
-NextAuth). The session lives in ``__Secure-authjs.session-token`` — a JWE
-stored as a single (un-chunked, ~1.2KB) cookie on ``app.greptile.com``.
+NextAuth) fronted by an OAuth login service at auth.greptile.com: an
+unauthenticated visit to any app page redirects to
+``auth.greptile.com/login?login_challenge=…`` — an email+password form (plus
+GitHub/GitLab/Google OAuth buttons).
+
+Every op runs **inside a tab of the engine-owned browser** via the
+``browser_session`` service (the Exa/WhatsApp pattern). The session is the
+browser profile itself — ``__Secure-authjs.session-token`` on
+``app.greptile.com``, written by Auth.js's own Set-Cookie, never extracted,
+never vaulted, never seen by this app. Both hosts share one ``greptile.com``
+tab; where the tab lands IS the auth signal, and each op body branches on
+``__onApp``.
 
 The dashboard session response ALSO contains a ``greptileToken`` — a
-short-lived HS256 JWT that the browser passes as
-``Authorization: Bearer <token>`` to the **backend API** at a separate host
-(api.greptile.com). That backend is where org / people / invites actually
-live — the ``/api/auth/session`` route on app.greptile.com is Auth.js only.
-
-Transport note: Dashboard is Vercel-hosted and blocks HTTP/2; all
-dashboard calls pass ``http2=False``. The backend (api.greptile.com)
-accepts HTTP/2.
+short-lived HS256 JWT the frontend passes as ``Authorization: Bearer`` to
+the backend API at api.greptile.com (cross-origin from the tab, exactly as
+the real frontend does). Org / people / invites live on the dashboard's
+tRPC route at ``/api/trpc`` instead.
 """
 
 import json
-import re
 
-from agentos import claims, client, connection, returns, test, timeout, url
-
-
-connection(
-    'dashboard',
-    base_url='https://app.greptile.com',
-    domain='app.greptile.com',
-    client='fetch',
-    # ⚠️ RETIRED COOKIE CONNECTION — the engine's cookie-vault path is gone
-    # (browser-session-store). This no longer resolves; authed ops fail with
-    # AUTH_FAILED until migrated to browser-driven: run fetch() inside the
-    # app.greptile.com tab via services.call(browser_session) and bind ops to
-    # @connection("none"). Template: apps/web/exa/exa.py.
-    auth={'type': 'cookies', 'domain': 'app.greptile.com', 'names': ['__Secure-authjs.session-token'], 'account': {'check': 'check_session'}},
-    label='Dashboard session',
-    help_url='https://app.greptile.com/settings/organization/people')
+from agentos import account, app_error, claims, connection, credentials, normalize_email, returns, test, timeout, services
 
 
 DASHBOARD_BASE = "https://app.greptile.com"
-
-# The actual backend API host. Express-powered, but org/people mutations go
-# through the dashboard's tRPC route at /api/trpc instead — the backend is used
-# by different features (code search, reviews, etc.).
 BACKEND_BASE = "https://api.greptile.com"
-
-# tRPC router lives at /api/trpc on the dashboard. Procedure names captured from
-# bundle spelunking — see readme.md "People / Org API" table.
-TRPC_BASE = f"{DASHBOARD_BASE}/api/trpc"
 
 # Invite link format pulled from the "Copy Invite Link" button's onClick in
 # chunk 164: `${appUrl}/invitation?token=${token}`.
@@ -56,68 +38,80 @@ INVITE_URL_TEMPLATE = f"{DASHBOARD_BASE}/invitation?token={{token}}"
 # Valid role values from the bundle (chunks reference `n.X.ADMIN`, `n.X.MEMBER`).
 VALID_ROLES = ("ADMIN", "MEMBER")
 
-
-# ---------------------------------------------------------------------------
-# Low-level helpers — one-shot HTTP with the engine-resolved cookie header
-# ---------------------------------------------------------------------------
-
-
-async def _dashboard_get(path: str, *, extra: dict | None = None) -> dict:
-    """GET against the dashboard — ambient fetch bundle + http2=False for
-    Vercel, cookies ride from the ambient Jar."""
-    u = path if path.startswith("http") else f"{DASHBOARD_BASE}{path}"
-    return await client.get(u, headers=extra or {}, http2=False)
+# browser_session target — a URL substring; the engine opens
+# https://<target>/ in the engine-owned browser when no tab matches.
+# auth.greptile.com shares the same registrable-domain tab.
+_APP = "app.greptile.com"
 
 
-async def _dashboard_post(path: str, *, json_body: dict | None = None,
-                          data: dict | None = None, extra: dict | None = None) -> dict:
-    u = path if path.startswith("http") else f"{DASHBOARD_BASE}{path}"
-    if json_body is not None:
-        return await client.post(u, json=json_body, headers=extra or {}, http2=False)
-    return await client.post(u, data=data or {}, headers=extra or {}, http2=False)
+# Readiness wait, prepended to every op body. A freshly opened tab is still
+# at about:blank when our JS first runs — a relative-URL fetch has no origin
+# to resolve against. We wait for the *family*, not a specific host, because
+# an unauthenticated visit bounces to auth.greptile.com: where the tab lands
+# IS the auth signal, and each body branches on `__onApp`.
+_PRELUDE = """
+const __deadline = Date.now() + 15000;
+while (location.hostname.indexOf('greptile.com') === -1 || document.readyState !== 'complete') {
+  if (Date.now() > __deadline) return { __error: 'tab_not_ready' };
+  await new Promise(r => setTimeout(r, 200));
+}
+const __onApp = location.hostname === 'app.greptile.com';
+"""
 
 
-async def _backend_request(method: str, path: str, *, bearer: str,
-                           json_body: dict | None = None, extra: dict | None = None) -> dict:
-    """Call the Greptile backend API (api.greptile.com) with the greptileToken."""
-    u = path if path.startswith("http") else f"https://api.greptile.com{path}"
-    headers: dict = {"Authorization": f"Bearer {bearer}"}
-    if extra:
-        headers.update(extra)
-    method = method.upper()
-    if method == "GET":
-        return await client.get(u, headers=headers)
-    if method == "POST":
-        return await client.post(u, json=json_body or {}, headers=headers)
-    if method == "PATCH":
-        return await client.patch(u, json=json_body or {}, headers=headers)
-    if method == "DELETE":
-        return await client.delete(u, headers=headers)
-    if method == "PUT":
-        return await client.put(u, json=json_body or {}, headers=headers)
-    raise ValueError(f"Unsupported method: {method}")
+async def _eval(body: str, *, timeout_s: int = 45):
+    """Run an op body inside the greptile.com tab in the engine-owned browser.
+
+    The engine matchmakes the `browser_session` provider, opens the tab (and
+    launches the browser) when needed, and returns the JS value. The body
+    runs once the tab has settled on a greptile.com origin, with `__onApp`
+    in scope telling it whether we're on the authenticated dashboard host or
+    were bounced to the auth host (logged out).
+    """
+    return await services.call(services.browser_session, params={
+        "target": _APP,
+        "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
+        "timeout": timeout_s,
+    })
+
+
+# Session probe. On the auth host we're logged out — no need to ask. On the
+# app host Auth.js returns `{}` (not an error) for anonymous visitors, so
+# `user` is the live signal.
+_SESSION_JS = """
+if (!__onApp) return null;
+const r = await fetch('/api/auth/session', { cache: 'no-store' });
+if (!r.ok) return { __error: 'http_' + r.status };
+const data = await r.json().catch(() => null);
+return (data && data.user) ? data : null;
+"""
 
 
 async def _get_session() -> dict | None:
-    """Hit /api/auth/session and return {user, expires} or None."""
-    resp = await _dashboard_get("/api/auth/session")
-    if resp.get("status") != 200:
+    """Live Auth.js session from the dashboard tab, or None."""
+    value = await _eval(_SESSION_JS)
+    if not isinstance(value, dict) or not value.get("user"):
         return None
-    data = resp.get("json")
-    if isinstance(data, dict) and data.get("user"):
-        return data
-    return None
+    return value
 
 
 async def _require_session() -> dict:
-    """Return the session dict or raise SESSION_EXPIRED so the engine retries."""
     session = await _get_session()
     if not session:
         raise RuntimeError(
-            "SESSION_EXPIRED: Greptile dashboard session is missing or invalid — "
-            "log in at https://app.greptile.com to refresh."
+            "SESSION_EXPIRED: no live Greptile session in the AgentOS browser "
+            "profile — run greptile.login to sign in."
         )
     return session
+
+
+def _needs_auth():
+    return app_error(
+        "No live Greptile dashboard session in the AgentOS browser profile. "
+        "Run greptile.login — it drives the email+password sign-in form at "
+        "auth.greptile.com with vault credentials.",
+        code="NeedsAuth",
+    )
 
 
 def _org_from_session(session: dict) -> dict:
@@ -207,37 +201,58 @@ def _normalize_role(role: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# tRPC helpers — GET for queries, POST for mutations. All requests hit
-# /api/trpc/<procedure> and use the "superjson" envelope `{json: {...}}`.
+# tRPC helpers — GET for queries, POST for mutations, both same-origin
+# fetch() inside the app tab. All requests hit /api/trpc/<procedure> with
+# the "superjson" envelope `{json: {...}}`.
 # ---------------------------------------------------------------------------
 
 
 async def _trpc_query(procedure: str, input_args: dict) -> dict:
-    """GET /api/trpc/<procedure>?input=<urlencoded json>. Ambient Jar
-    supplies cookies; connection's fetch-bundle supplies UA/Sec-*."""
+    """GET /api/trpc/<procedure>?input=<urlencoded json> inside the tab."""
     payload = json.dumps({"json": input_args}, separators=(",", ":"))
-    u = url.build(f"{TRPC_BASE}/{procedure}", params={"input": payload})
-    return await client.get(u, http2=False)
+    return await _eval(f"""
+if (!__onApp) return {{ __error: 'needs_auth' }};
+const u = '/api/trpc/{procedure}?input=' + encodeURIComponent({json.dumps(payload)});
+const r = await fetch(u, {{ cache: 'no-store' }});
+const body = await r.json().catch(() => null);
+return {{ status: r.status, json: body }};
+""")
 
 
 async def _trpc_mutate(procedure: str, input_args: dict) -> dict:
-    """POST /api/trpc/<procedure> with {json: {...}} body."""
-    u = f"{TRPC_BASE}/{procedure}"
-    return await client.post(u, json={"json": input_args}, http2=False)
+    """POST /api/trpc/<procedure> with {json: {...}} body inside the tab."""
+    payload = json.dumps({"json": input_args}, separators=(",", ":"))
+    return await _eval(f"""
+if (!__onApp) return {{ __error: 'needs_auth' }};
+const r = await fetch('/api/trpc/{procedure}', {{
+  method: 'POST',
+  headers: {{ 'Content-Type': 'application/json' }},
+  body: {json.dumps(payload)},
+}});
+const body = await r.json().catch(() => null);
+return {{ status: r.status, json: body }};
+""")
 
 
-def _unwrap_trpc(resp: dict, *, procedure: str) -> dict:
+def _unwrap_trpc(resp, *, procedure: str) -> dict:
     """Return the inner `result.data.json` payload or raise with the tRPC error.
 
     Shape: {"result":{"data":{"json":<payload>}}} on success.
              {"error":{"json":{"message":...,"code":...}}} on failure.
     """
+    if not isinstance(resp, dict):
+        raise RuntimeError(f"tRPC {procedure}: tab eval returned {resp!r}")
+    if resp.get("__error") == "needs_auth":
+        raise RuntimeError(
+            "SESSION_EXPIRED: no live Greptile session — run greptile.login."
+        )
+    if resp.get("__error"):
+        raise RuntimeError(f"tRPC {procedure} failed in the tab: {resp['__error']}")
     status = resp.get("status")
     body = resp.get("json")
     if not isinstance(body, dict):
         raise RuntimeError(
-            f"tRPC {procedure} returned non-JSON body (status={status}): "
-            f"{str(resp.get('body'))[:200]}"
+            f"tRPC {procedure} returned non-JSON body (status={status})"
         )
     if "error" in body:
         err = body["error"]
@@ -246,7 +261,7 @@ def _unwrap_trpc(resp: dict, *, procedure: str) -> dict:
         code = (inner or {}).get("code") or (inner or {}).get("data", {}).get("code")
         raise RuntimeError(f"tRPC {procedure} failed ({code}, status={status}): {msg}")
     if status and status >= 400:
-        raise RuntimeError(f"tRPC {procedure} HTTP {status}: {str(resp.get('body'))[:200]}")
+        raise RuntimeError(f"tRPC {procedure} HTTP {status}: {body!r}")
     try:
         return body["result"]["data"]["json"]
     except (KeyError, TypeError) as e:
@@ -266,22 +281,21 @@ async def _resolve_tenant_id(tenant_id: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# check_session — identity probe. Wired to connections.dashboard.auth.account.check
+# The account trio — check_session / login / logout, browser-driven
 # ---------------------------------------------------------------------------
 
 
+@account.check
 @test
 @returns("account")
 @claims("primary_user")
-@connection("dashboard")
-@timeout(15)
-async def check_session(*, auth: dict = None, **params) -> dict:
-    """Verify Greptile dashboard session and identify the logged-in user + current org.
+@connection("none")
+@timeout(60)
+async def check_session(**params) -> dict:
+    """Verify the Greptile dashboard session and identify the logged-in user + org.
 
-    Returns a full `account` node on success (id, at, identifier, email,
-    handle, displayName, accountType, ...) so the graph gets a real Greptile
-    login landed here rather than elsewhere. Preserves the
-    authenticated/identifier/display fields the Rust auth-bridge parses.
+    The session lives in the engine-owned browser profile; this op asks
+    Auth.js from inside the app tab. No cookie ever reaches the app.
     """
     session = await _get_session()
     if not session:
@@ -291,29 +305,192 @@ async def check_session(*, auth: dict = None, **params) -> dict:
     label = user.get("email")
     if org.get("name"):
         label = f"{user.get('email')} @ {org['name']} ({org.get('role','MEMBER')})"
-    account = _greptile_account_from_user(user, org)
+    acct = _greptile_account_from_user(user, org)
     return {
-        **account,
+        **acct,
         "authenticated": True,
         "identifier": user.get("email") or "",
         "display": label,
     }
 
 
+# React-safe value set: the native setter + input/change events. A plain
+# `el.value = …` is ignored by the framework's controlled inputs.
+_REACT_SET = """
+const __setVal = (el, v) => {
+  const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  s.call(el, v);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+};
+"""
+
+# If the tab is parked on a stale app.greptile.com SPA page with a dead
+# session, reload the app root — the server bounces us to the auth host's
+# sign-in form. Navigation kills this eval's context, so we just kick it
+# off and let the *next* eval's prelude wait for the page to settle.
+_GOTO_LOGIN_JS = """
+if (location.hostname === 'auth.greptile.com'
+    && document.querySelector('input[name=email]')) return { ready: true };
+location.replace('https://app.greptile.com/');
+return { navigating: true };
+"""
+
+# Drive the real email+password form at auth.greptile.com (an OAuth
+# login_challenge flow in front of Auth.js). Submitting the actual form —
+# not a programmatic POST — keeps any anti-bot check clearing invisibly in
+# the real browser, and the session lands in the profile via the flow's own
+# redirect chain back to app.greptile.com.
+_LOGIN_JS = _REACT_SET + """
+let emailInp = null;
+const d1 = Date.now() + 15000;
+while (Date.now() < d1) {
+  emailInp = document.querySelector('input[name=email]');
+  if (emailInp) break;
+  await new Promise(r => setTimeout(r, 300));
+}
+if (!emailInp) return { __error: 'sign-in form never appeared (host: ' + location.hostname + ')' };
+const passInp = document.querySelector('input[name=password]');
+if (!passInp) return { __error: 'no password input on the sign-in form' };
+__setVal(emailInp, %(email)s);
+__setVal(passInp, %(password)s);
+await new Promise(r => setTimeout(r, 400));
+const btn = [...document.querySelectorAll('button')].find(b => /^log\\s?in$/i.test(b.textContent.trim()));
+if (!btn) return { __error: 'no Login button on the sign-in form' };
+for (let i = 0; i < 20 && btn.disabled; i++) await new Promise(r => setTimeout(r, 500));
+btn.click();
+const d2 = Date.now() + 30000;
+while (Date.now() < d2) {
+  if (location.hostname === 'app.greptile.com') return { ok: true };
+  const t = document.body.innerText;
+  if (/invalid|incorrect|wrong|not found|failed/i.test(t)
+      && document.querySelector('input[name=password]')) {
+    return { __error: 'credentials rejected by the sign-in form' };
+  }
+  await new Promise(r => setTimeout(r, 400));
+}
+return { __error: 'no redirect to app.greptile.com after submitting the form' };
+"""
+
+
+@account.login
+@returns("account")
+@connection("none")
+@timeout(120)
+async def login(*, email: str = "", password: str = "", **params) -> dict:
+    """Sign in to the Greptile dashboard — or report the already-live session.
+
+    Drives the email+password form at auth.greptile.com inside the
+    engine-owned browser tab; the session lands in the profile through the
+    flow's own redirect chain. Accounts created via GitHub/GitLab/Google
+    OAuth have no password — sign in once headed in the AgentOS browser
+    instead.
+
+    Args:
+        email: Address to sign in as. Optional — resolved from stored
+            credentials (1Password, Keychain, vault) when omitted.
+        password: Account password. Same resolution as email.
+    """
+    session = await _get_session()
+    if session:
+        user = session.get("user", {}) or {}
+        return _greptile_account_from_user(user, _org_from_session(session))
+
+    if not email or not password:
+        creds = await credentials.retrieve(domain=".greptile.com",
+                                           required=["email", "password"])
+        if creds.get("found"):
+            value = creds.get("value") or {}
+            email = email or value.get("email") or creds.get("identifier") or ""
+            password = password or value.get("password") or ""
+    if not email or not password:
+        return app_error(
+            "No Greptile credentials to sign in with.",
+            code="NeedsCredentials",
+            required=["email", "password"],
+            hint="Pass email+password, store a greptile.com item in a "
+                 "login_credentials provider, or (OAuth-only account) sign "
+                 "in once headed in the AgentOS browser.",
+        )
+    email = normalize_email(email)
+
+    # Get the tab onto the sign-in form (a dead-session app page won't have
+    # one — reloading the app root bounces us to auth.greptile.com).
+    nav = await _eval(_GOTO_LOGIN_JS)
+    if isinstance(nav, dict) and nav.get("__error"):
+        return app_error(f"Reaching the sign-in form failed: {nav['__error']}",
+                         code="SigninFailed")
+
+    value = await _eval(_LOGIN_JS % {"email": json.dumps(email),
+                                     "password": json.dumps(password)},
+                        timeout_s=90)
+    if not isinstance(value, dict) or value.get("__error"):
+        detail = value.get("__error") if isinstance(value, dict) else value
+        return app_error(
+            f"Driving the Greptile sign-in form failed: {detail}. The login "
+            "page shape may have changed — re-inspect the form. OAuth-only "
+            "accounts (GitHub/GitLab/Google) must sign in once headed.",
+            code="SigninFailed",
+        )
+
+    session = await _get_session()
+    if not session:
+        return app_error(
+            "The form submitted but no live session followed — the account "
+            "may require an OAuth provider. Sign in once headed in the "
+            "AgentOS browser.",
+            code="SigninFailed",
+        )
+    user = session.get("user", {}) or {}
+    return _greptile_account_from_user(user, _org_from_session(session))
+
+
+@account.logout
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(60)
+async def logout(**params) -> dict:
+    """Sign out of the Greptile dashboard and invalidate the session.
+
+    Runs Auth.js's signout same-origin in the app tab; the response's
+    Set-Cookie clears the session token from the browser profile.
+    Idempotent: signing out a dead session is still a 200 at Auth.js.
+    """
+    value = await _eval("""
+if (!__onApp) return { ok: true, already: 'logged_out' };
+const csrf = await (await fetch('/api/auth/csrf')).json().catch(() => null);
+if (!csrf || !csrf.csrfToken) return { __error: 'csrf_failed' };
+const body = new URLSearchParams({ csrfToken: csrf.csrfToken, json: 'true' });
+const r = await fetch('/api/auth/signout', { method: 'POST', body });
+if (!r.ok) return { __error: 'http_' + r.status };
+return { ok: true };
+""")
+    if not isinstance(value, dict) or value.get("__error"):
+        return app_error(
+            f"Signout failed in the app tab: "
+            f"{value.get('__error') if isinstance(value, dict) else value}",
+            code="LogoutFailed",
+        )
+    return {
+        "status": "logged_out",
+        "hint": "Session token cleared from the browser profile by Auth.js's own Set-Cookie.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Member management — the primary surface of this app. All routes go through
-# /api/trpc on the dashboard host. Procedures captured from bundle spelunking;
-# see the readme "People / Org API" table.
+# /api/trpc on the dashboard host, same-origin inside the tab. Procedures
+# captured from bundle spelunking; see the readme "People / Org API" table.
 # ---------------------------------------------------------------------------
 
 
 @test
 @returns("account[]")
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def list_members(*, tenant_external_id: str = None, query: str = "",
                        role: str = None, page: int = 0, page_size: int = 100,
-                       auth: dict = None, **params) -> dict:
+                       **params) -> dict:
     """List active members of the current Greptile organization.
 
     Calls `organization.searchPeople` and returns only real members (type=member)
@@ -343,11 +520,11 @@ async def list_members(*, tenant_external_id: str = None, query: str = "",
 
 
 @returns("invitation[]")
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def list_invites(*, tenant_external_id: str = None, query: str = "",
                        page: int = 0, page_size: int = 100,
-                       auth: dict = None, **params) -> dict:
+                       **params) -> dict:
     """List pending invitations in the current Greptile organization.
 
     Calls `organization.searchPeople` and returns only invite rows as
@@ -376,10 +553,9 @@ async def list_invites(*, tenant_external_id: str = None, query: str = "",
 
 @returns({"inviteUrl": "string", "token": "string", "defaultRole": "string",
           "tenantName": "string"})
-@connection("dashboard")
-@timeout(30)
-async def get_invite_link(*, tenant_external_id: str = None,
-                          auth: dict = None, **params) -> dict:
+@connection("none")
+@timeout(60)
+async def get_invite_link(*, tenant_external_id: str = None, **params) -> dict:
     """Fetch the current shareable org invite link.
 
     Calls `invitation.getOrganizationInviteLink` and assembles the full URL
@@ -399,11 +575,11 @@ async def get_invite_link(*, tenant_external_id: str = None,
 
 
 @returns({"inviteUrl": "string", "token": "string", "defaultRole": "string"})
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def create_invite_link(*, default_role: str = "MEMBER",
                              tenant_external_id: str = None,
-                             auth: dict = None, **params) -> dict:
+                             **params) -> dict:
     """Create or rotate the org invite link.
 
     Calls `invitation.createOrganizationInviteLink` — if a link already exists
@@ -422,10 +598,10 @@ async def create_invite_link(*, default_role: str = "MEMBER",
 
 
 @returns({"ok": "boolean", "revokedToken": "string"})
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def revoke_invite_link(*, tenant_external_id: str = None,
-                             auth: dict = None, **params) -> dict:
+                             **params) -> dict:
     """Revoke the org invite link entirely. New invitees won't be able to join.
 
     Calls `invitation.revokeOrganizationInviteLink`.
@@ -441,11 +617,11 @@ async def revoke_invite_link(*, tenant_external_id: str = None,
 
 
 @returns("invitation")
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def send_invite(*, email: str, role: str = "MEMBER",
                       tenant_external_id: str = None,
-                      auth: dict = None, **params) -> dict:
+                      **params) -> dict:
     """Email an invite to join the Greptile org.
 
     Calls `invitation.create` — matches the "Invite by email" flow on the people
@@ -478,11 +654,11 @@ async def send_invite(*, email: str, role: str = "MEMBER",
 
 
 @returns({"ok": "boolean", "email": "string", "role": "string"})
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def update_role(*, email: str, role: str,
                       tenant_external_id: str = None,
-                      auth: dict = None, **params) -> dict:
+                      **params) -> dict:
     """Change a member's role in the current org.
 
     Calls `organization.setMemberRole`.
@@ -511,10 +687,10 @@ async def update_role(*, email: str, role: str,
 
 
 @returns({"ok": "boolean", "email": "string"})
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def remove_member(*, email: str, tenant_external_id: str = None,
-                        auth: dict = None, **params) -> dict:
+                        **params) -> dict:
     """Remove a member from the current org.
 
     Calls `organization.removeMember`. Arg shape `{email, tenantExternalId}`
@@ -531,10 +707,10 @@ async def remove_member(*, email: str, tenant_external_id: str = None,
 
 
 @returns({"ok": "boolean", "email": "string"})
-@connection("dashboard")
-@timeout(30)
+@connection("none")
+@timeout(60)
 async def revoke_invite(*, email: str, tenant_external_id: str = None,
-                        auth: dict = None, **params) -> dict:
+                        **params) -> dict:
     """Revoke a single pending email invite (not the shared link).
 
     Calls `invitation.revoke`. For the pending-invite rows in list_members.
@@ -549,292 +725,92 @@ async def revoke_invite(*, email: str, tenant_external_id: str = None,
 
 
 # ---------------------------------------------------------------------------
-# Reverse-engineering helpers. Keep while the API surface is unstable.
+# Reverse-engineering helpers. Keep while the tRPC surface is unstable.
 # ---------------------------------------------------------------------------
 
 
-@returns({"status": "integer", "url": "string", "headers": "object", "body": "string", "json": "object"})
-@connection("dashboard")
-@timeout(30)
+@returns({"status": "integer", "url": "string", "body": "string", "json": "object"})
+@connection("none")
+@timeout(60)
 async def probe(*, path: str, method: str = "GET", json_body: dict = None,
-                extra_headers: dict = None, max_body: int = 4000,
-                auth: dict = None, **params) -> dict:
-    """Call an app.greptile.com path with the resolved session cookies.
+                max_body: int = 4000, **params) -> dict:
+    """Fetch an app.greptile.com path same-origin inside the tab.
 
     Args:
-        path: Path or full URL.
+        path: Path on the dashboard host (e.g. /api/auth/session).
         method: HTTP verb (GET, POST, PATCH, DELETE, PUT).
         json_body: JSON body for writes.
-        extra_headers: Extra headers merged into the request.
         max_body: Body clip length (default 4000).
     """
-    u = path if path.startswith("http") else f"{DASHBOARD_BASE}{path}"
-    headers = dict(extra_headers or {})
     method = (method or "GET").upper()
-
-    if method == "GET":
-        resp = await client.get(u, headers=headers, http2=False)
-    elif method == "POST":
-        resp = await client.post(u, json=json_body or {}, headers=headers, http2=False)
-    elif method == "PATCH":
-        resp = await client.patch(u, json=json_body or {}, headers=headers, http2=False)
-    elif method == "DELETE":
-        if json_body is not None:
-            resp = await client.delete(u, json=json_body, headers=headers, http2=False)
-        else:
-            resp = await client.delete(u, headers=headers, http2=False)
-    elif method == "PUT":
-        resp = await client.put(u, json=json_body or {}, headers=headers, http2=False)
-    else:
-        return {"__result__": {"error": f"Unsupported method: {method}"}}
-
-    body = resp.get("body") or ""
-    if isinstance(body, str) and len(body) > max_body:
-        body = body[:max_body] + f"...[truncated {len(body)} bytes]"
-
+    opts = {"method": method, "cache": "no-store"}
+    if json_body is not None:
+        opts["headers"] = {"Content-Type": "application/json"}
+        opts["body"] = json.dumps(json_body)
+    value = await _eval(f"""
+if (!__onApp) return {{ __error: 'needs_auth' }};
+const r = await fetch({json.dumps(path)}, {json.dumps(opts)});
+const text = await r.text();
+let parsed = null;
+try {{ parsed = JSON.parse(text); }} catch (e) {{}}
+return {{ status: r.status, body: parsed ? '' : text.slice(0, {int(max_body)}), json: parsed }};
+""")
+    if isinstance(value, dict) and value.get("__error") == "needs_auth":
+        return _needs_auth()
+    if not isinstance(value, dict) or value.get("__error"):
+        return app_error(f"probe failed in the tab: {value!r}", code="DashboardError")
     return {"__result__": {
-        "status": resp.get("status"),
-        "u": u,
-        "headers": {k: v for k, v in (resp.get("headers") or {}).items()
-                    if k.lower() in ("content-type", "set-cookie", "location",
-                                     "x-powered-by", "server", "cache-control")},
-        "body": body if not resp.get("json") else "",
-        "json": resp.get("json"),
+        "status": value.get("status"),
+        "url": f"{DASHBOARD_BASE}{path}" if not path.startswith("http") else path,
+        "body": value.get("body") or "",
+        "json": value.get("json"),
     }}
 
 
-@returns({"status": "integer", "url": "string", "headers": "object",
-          "body": "string", "json": "object"})
-@connection("dashboard")
-@timeout(30)
+@returns({"status": "integer", "url": "string", "body": "string", "json": "object"})
+@connection("none")
+@timeout(60)
 async def backend_probe(*, path: str, method: str = "GET", base: str = None,
-                        json_body: dict = None, extra_headers: dict = None,
-                        max_body: int = 4000, auth: dict = None, **params) -> dict:
-    """Call the Greptile backend API with the greptileToken from the session.
+                        json_body: dict = None, max_body: int = 4000,
+                        **params) -> dict:
+    """Call the Greptile backend API (api.greptile.com) with the greptileToken.
+
+    The bearer is read from the session response and the request runs
+    cross-origin from the app tab — exactly the call the real frontend makes,
+    so CORS already allows it.
 
     Args:
         path: Path or full URL on the backend.
         method: HTTP verb.
         base: Backend base URL override (defaults to https://api.greptile.com).
         json_body: JSON body for writes.
-        extra_headers: Extra headers.
     """
-    session = await _require_session()
-    user = session.get("user") or {}
-    bearer = user.get("greptileToken") or ""
-    if not bearer:
-        return {"__result__": {"error": "No greptileToken on session"}}
-
-    base = base or "https://api.greptile.com"
-    u = path if path.startswith("http") else f"{base}{path}"
-    headers = {"Authorization": f"Bearer {bearer}"}
-    if extra_headers:
-        headers.update(extra_headers)
-
+    u = path if path.startswith("http") else f"{base or BACKEND_BASE}{path}"
     method = (method or "GET").upper()
-    if method == "GET":
-        resp = await client.get(u, headers=headers)
-    elif method == "POST":
-        resp = await client.post(u, json=json_body or {}, headers=headers)
-    elif method == "PATCH":
-        resp = await client.patch(u, json=json_body or {}, headers=headers)
-    elif method == "DELETE":
-        resp = await client.delete(u, headers=headers)
-    elif method == "PUT":
-        resp = await client.put(u, json=json_body or {}, headers=headers)
-    else:
-        return {"__result__": {"error": f"Unsupported method: {method}"}}
-
-    body = resp.get("body") or ""
-    if isinstance(body, str) and len(body) > max_body:
-        body = body[:max_body] + f"...[truncated {len(body)} bytes]"
-
+    body_js = json.dumps(json.dumps(json_body)) if json_body is not None else "null"
+    value = await _eval(f"""
+if (!__onApp) return {{ __error: 'needs_auth' }};
+const s = await fetch('/api/auth/session', {{ cache: 'no-store' }});
+const session = await s.json().catch(() => null);
+const bearer = session && session.user ? session.user.greptileToken : null;
+if (!bearer) return {{ __error: 'needs_auth' }};
+const opts = {{ method: {json.dumps(method)}, headers: {{ 'Authorization': 'Bearer ' + bearer }} }};
+const bodyStr = {body_js};
+if (bodyStr) {{ opts.headers['Content-Type'] = 'application/json'; opts.body = bodyStr; }}
+const r = await fetch({json.dumps(u)}, opts);
+const text = await r.text();
+let parsed = null;
+try {{ parsed = JSON.parse(text); }} catch (e) {{}}
+return {{ status: r.status, body: parsed ? '' : text.slice(0, {int(max_body)}), json: parsed }};
+""")
+    if isinstance(value, dict) and value.get("__error") == "needs_auth":
+        return _needs_auth()
+    if not isinstance(value, dict) or value.get("__error"):
+        return app_error(f"backend_probe failed in the tab: {value!r}",
+                         code="DashboardError")
     return {"__result__": {
-        "status": resp.get("status"),
-        "u": u,
-        "headers": {k: v for k, v in (resp.get("headers") or {}).items()
-                    if k.lower() in ("content-type", "set-cookie", "location",
-                                     "x-powered-by", "server", "cache-control",
-                                     "access-control-allow-origin")},
-        "body": body if not resp.get("json") else "",
-        "json": resp.get("json"),
-    }}
-
-
-@returns({"url": "string", "status": "integer", "size": "integer", "matches": "array"})
-@connection("dashboard")
-@timeout(60)
-async def grep_bundle(*, path: str, patterns: list = None, context: int = 60,
-                      max_matches: int = 120, auth: dict = None, **params) -> dict:
-    """Fetch a (usually large) URL with session cookies and return regex matches.
-
-    Designed for Next.js chunk spelunking: the raw body would be too large to round
-    trip through the CLI renderer, so the app runs the regexes itself and returns
-    only the hits. Default patterns look for API URLs, fetch() calls, and
-    server-action markers.
-
-    Args:
-        path: Path or full URL on the dashboard host.
-        patterns: List of regex patterns. Defaults to a useful RE starter pack.
-        context: Chars of surrounding context to include per match (default 60).
-        max_matches: Cap per pattern to keep results bounded.
-    """
-    u = path if path.startswith("http") else f"{DASHBOARD_BASE}{path}"
-    resp = await client.get(u, http2=False)
-    body = resp.get("body") or ""
-    if not isinstance(body, str):
-        body = str(body)
-
-    default_patterns = [
-        r"https?://api\.greptile\.com[^\"'\s<>`]{0,160}",
-        r"https?://app\.greptile\.com/api/[^\"'\s<>`]{0,160}",
-        r"\"/api/[^\"\s]{0,160}\"",
-        r"\"/v[0-9]/[^\"\s]{0,160}\"",
-        r"Next-Action\"\s*:\s*\"[0-9a-f]{40,}\"",
-        r"\"/organizations/[^\"\s]{0,160}\"",
-        r"\"/members[^\"\s]{0,160}\"",
-        r"\"/invites?[^\"\s]{0,160}\"",
-    ]
-    pats = patterns or default_patterns
-
-    out = []
-    for pat in pats:
-        try:
-            rx = re.compile(pat)
-        except re.error as e:
-            out.append({"pattern": pat, "error": f"regex: {e}", "hits": []})
-            continue
-        hits = []
-        for m in rx.finditer(body):
-            if len(hits) >= max_matches:
-                break
-            start = max(0, m.start() - context)
-            end = min(len(body), m.end() + context)
-            hits.append({
-                "match": m.group(0),
-                "context": body[start:end],
-                "pos": m.start(),
-            })
-        out.append({"pattern": pat, "count": len(hits), "hits": hits})
-
-    return {"__result__": {
-        "u": u,
-        "status": resp.get("status"),
-        "size": len(body),
-        "matches": out,
-    }}
-
-
-@returns({"page_url": "string", "chunks_tried": "integer", "chunks_ok": "integer",
-          "total_bytes": "integer", "matches": "array"})
-@connection("dashboard")
-@timeout(120)
-async def grep_page_chunks(*, page: str, patterns: list = None, context: int = 80,
-                           max_matches_per_pattern: int = 40,
-                           auth: dict = None, **params) -> dict:
-    """Fetch a dashboard page, extract every Next.js JS chunk, and grep them all.
-
-    Consolidates the RE cycle: page → chunks → regex hits. Each hit is tagged with
-    the chunk URL it came from so you can follow up by fetching the specific chunk.
-
-    Args:
-        page: Page path on the dashboard (e.g. /settings/organization/people).
-        patterns: Regex list. Defaults to an API-endpoint starter pack.
-        context: Surrounding chars included per hit.
-        max_matches_per_pattern: Across all chunks combined.
-    """
-    page_url = page if page.startswith("http") else f"{DASHBOARD_BASE}{page}"
-
-    # 1. Fetch the HTML
-    html_resp = await client.get(page_url, http2=False)
-    html = html_resp.get("body") or ""
-    if not isinstance(html, str):
-        html = str(html)
-
-    # 2. Extract chunk URLs from <script src="..."> tags
-    chunk_re = re.compile(r'src="(/_next/static/chunks/[^"]+\.js)"')
-    chunk_paths = list(dict.fromkeys(chunk_re.findall(html)))
-
-    default_patterns = [
-        r"https?://api\.greptile\.com[^\"'\s<>`()]{0,160}",
-        r'"/v[0-9]/[a-zA-Z/_\-{}]{0,160}"',
-        r'"/api/[a-zA-Z/_\-{}]{0,160}"',
-        r'"/organizations/[a-zA-Z/_\-{}]{0,160}"',
-        r'"/members[a-zA-Z/_\-{}]{0,160}"',
-        r'"/invites?[a-zA-Z/_\-{}]{0,160}"',
-        r'"/users?/[a-zA-Z/_\-{}]{0,160}"',
-        r'"/tenants?/[a-zA-Z/_\-{}]{0,160}"',
-        r'greptileToken',
-    ]
-    pats = patterns or default_patterns
-    compiled = []
-    for pat in pats:
-        try:
-            compiled.append((pat, re.compile(pat)))
-        except re.error as e:
-            compiled.append((pat, None))
-    buckets = {pat: [] for pat, _ in compiled}
-
-    chunks_ok = 0
-    total_bytes = 0
-
-    # 3. Fetch each chunk and grep
-    for cpath in chunk_paths:
-        curl = f"{DASHBOARD_BASE}{cpath}"
-        try:
-            r = await client.get(curl, http2=False)
-        except Exception as e:
-            continue
-        if r.get("status") != 200:
-            continue
-        body = r.get("body") or ""
-        if not isinstance(body, str):
-            continue
-        chunks_ok += 1
-        total_bytes += len(body)
-
-        for pat, rx in compiled:
-            if rx is None:
-                continue
-            bucket = buckets[pat]
-            if len(bucket) >= max_matches_per_pattern:
-                continue
-            for m in rx.finditer(body):
-                if len(bucket) >= max_matches_per_pattern:
-                    break
-                start = max(0, m.start() - context)
-                end = min(len(body), m.end() + context)
-                bucket.append({
-                    "chunk": cpath,
-                    "match": m.group(0),
-                    "context": body[start:end].replace("\n", " "),
-                })
-
-    matches = [{"pattern": pat, "count": len(hits), "hits": hits}
-               for pat, hits in buckets.items()]
-
-    return {"__result__": {
-        "page_url": page_url,
-        "chunks_tried": len(chunk_paths),
-        "chunks_ok": chunks_ok,
-        "total_bytes": total_bytes,
-        "matches": matches,
-    }}
-
-
-@returns({"cookie_names": "array", "cookie_count": "integer", "domains": "array"})
-@connection("dashboard")
-@timeout(10)
-async def inspect_auth(**params) -> dict:
-    """Debug: report the ambient cookie state for this tool call.
-
-    Cookie auth is retired — the engine no longer seeds an ambient Jar,
-    so there are no SDK-side cookies to inspect. Always reports empty.
-    Migrate greptile to browser-driven auth (browser-session-store) and
-    drop this helper. Template: apps/web/exa/exa.py.
-    """
-    return {"__result__": {
-        "cookie_names": [],
-        "cookie_count": 0,
-        "domains": [],
+        "status": value.get("status"),
+        "url": u,
+        "body": value.get("body") or "",
+        "json": value.get("json"),
     }}
