@@ -49,10 +49,16 @@ def _map_email(row):
         result["messageId"] = row["message_id"]
     if row.get("in_reply_to"):
         result["inReplyTo"] = row["in_reply_to"]
-    if row.get("body_text"):
-        result["content"] = row["body_text"]
+    # An email is multipart/alternative — a plaintext part and an HTML part
+    # of one body. Store the richest as the node's content, typed by what it
+    # actually is; consumers project down (the GUI renders HTML, an agent
+    # gets markdown derived from it). HTML wins; plaintext is the fallback.
     if row.get("body_html"):
-        result["bodyHtml"] = row["body_html"]
+        result["content"] = row["body_html"]
+        result["content_mime"] = "text/html"
+    elif row.get("body_text"):
+        result["content"] = row["body_text"]
+        result["content_mime"] = "text/plain"
     if row.get("size_estimate"):
         result["sizeEstimate"] = row["size_estimate"]
     if row.get("to_raw"):
