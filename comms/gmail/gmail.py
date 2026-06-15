@@ -321,6 +321,17 @@ def _map_email(msg):
     if _get_header(headers, "List-Unsubscribe-Post") and unsubscribe and unsubscribe.startswith("http"):
         unsubscribe_one_click = True
 
+    # Body — store the single richest representation so the engine renders
+    # it through the MIME pipeline: the HTML part when present (text/html),
+    # else the plain-text part (text/plain). The producer declares the type
+    # (`content_mime`); the engine never guesses. (html-content outcome,
+    # Principle 2 — "store the richest; derive the rest".)
+    html_body = _decode_body_html(payload)
+    if html_body:
+        body, body_mime = html_body, "text/html"
+    else:
+        body, body_mime = _decode_body_text(payload), "text/plain"
+
     # List-Id (RFC 2919) — extract the identifier from angle brackets
     list_id_raw = _get_header(headers, "List-Id") or ""
     list_id_match = re.search(r"<([^>]+)>", list_id_raw)
@@ -348,7 +359,8 @@ def _map_email(msg):
     return {
         "id": msg.get("id"),
         "name": subject,
-        "content": msg.get("snippet", ""),
+        "content": body,
+        "content_mime": body_mime,
         "author": author,
         "published": _internaldate_to_iso(msg.get("internalDate")),
         "isStarred": "STARRED" in label_ids,
@@ -362,7 +374,6 @@ def _map_email(msg):
         "messageId": _get_header(headers, "Message-ID") or "",
         "inReplyTo": _get_header(headers, "In-Reply-To"),
         "conversationId": msg.get("threadId", ""),
-        "content": _decode_body_text(payload),
         "labelIds": label_ids,
         "sizeEstimate": msg.get("sizeEstimate"),
         "historyId": msg.get("historyId"),
