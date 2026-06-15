@@ -17,6 +17,47 @@ from pathlib import Path
 from agentos import file_info, file_list, file_read, provides, returns, shell, test, timeout, volume_transport
 
 
+# ── Full Disk Access / TCC ────────────────────────────────────────────────
+# macOS hides the contents of certain user folders (Desktop, Documents,
+# Downloads) from a process that lacks Full Disk Access — os.scandir returns
+# an EMPTY listing with no error, indistinguishable from a truly empty
+# folder. So an empty listing on a protected path is a lie; we probe FDA and
+# report an honest permission error instead, which the GUI surfaces as
+# "Grant Full Disk Access" rather than spinning Loading… forever.
+
+_TCC_PROTECTED_DIRS = [
+    os.path.expanduser(f"~/{name}") for name in ("Desktop", "Documents", "Downloads")
+]
+# The TCC database itself — readable ONLY with Full Disk Access, and present
+# on every macOS install. The definitive FDA canary (a POSIX-readable folder
+# like ~/Library/Safari is not — it lists without FDA and lies).
+_FDA_PROBE = os.path.expanduser("~/Library/Application Support/com.apple.TCC/TCC.db")
+_fda_cache: bool | None = None
+
+
+def _has_full_disk_access() -> bool:
+    """Whether this process can read FDA-gated paths. Cached per worker."""
+    global _fda_cache
+    if _fda_cache is None:
+        try:
+            with open(_FDA_PROBE, "rb") as probe:
+                probe.read(1)
+            _fda_cache = True
+        except PermissionError:
+            _fda_cache = False
+        except OSError:
+            # Probe absent or some other error — don't falsely claim a block.
+            _fda_cache = True
+    return _fda_cache
+
+
+def _is_tcc_protected(path: str) -> bool:
+    """Whether `path` is (or is under) a TCC-protected user folder."""
+    return any(
+        path == d or path.startswith(d + os.sep) for d in _TCC_PROTECTED_DIRS
+    )
+
+
 APP_SYSTEM_PROFILER_SWIFT = r"""
 import Foundation
 import AppKit
@@ -1291,6 +1332,18 @@ async def list_contents(*, id=None, cursor=None, show_hidden=False, **_kwargs):
     resolved = os.path.abspath(os.path.expanduser(id or "/"))
     if not os.path.isdir(resolved):
         raise ValueError(f"Not a directory: {resolved}")
+
+    # A TCC-protected folder without Full Disk Access lists as empty (no
+    # error) — raise the real blocker instead of returning a false empty
+    # folder. The "permission_denied:" prefix is the stable token the GUI
+    # classifies on to stop the cold-volume retry and show "Grant Full Disk
+    # Access" rather than spinning Loading… forever.
+    if _is_tcc_protected(resolved) and not _has_full_disk_access():
+        raise PermissionError(
+            f"permission_denied: Full Disk Access required to read {resolved}. "
+            "Grant it in System Settings → Privacy & Security → Full Disk Access, "
+            "then restart AgentOS."
+        )
 
     entries = []
     with os.scandir(resolved) as scanner:
