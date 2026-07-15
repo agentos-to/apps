@@ -1,13 +1,17 @@
 ---
 id: reddit
-services:
-- http
 name: Reddit
-description: Read public Reddit communities, posts, and comments
+description: Read Reddit — posts, comments, and communities — through a browser-driven session, mapped to the post and community shapes
+services:
+  - browser_session
 color: '#FF4500'
 website: https://reddit.com
 privacy_url: https://www.reddit.com/policies/privacy-policy
 terms_url: https://www.redditinc.com/policies/user-agreement
+product:
+  name: Reddit
+  website: https://reddit.com
+  developer: Reddit, Inc.
 sources:
   images:
   - styles.redditmedia.com
@@ -22,66 +26,69 @@ sources:
 
 # Reddit
 
-Access public Reddit data using Reddit's built-in JSON endpoints.
-
-## No Setup Required
-
-Unlike the official Reddit API (which now requires pre-approval), this adapter uses Reddit's public JSON endpoints that work immediately without any configuration.
+Read Reddit through a live reddit.com tab in the engine's HEADLESS background
+profile. Every read is a **same-origin `fetch()`** of Reddit's own `.json`
+endpoints, run via the `browser_session` service — the Exa pattern. The browser
+profile IS the session; requests originate from the real browser, so Reddit's
+JS-challenge / bot-detection clears invisibly and reads are never 403'd (the
+failure of the old plain-HTTP connector). No window opens for a read.
 
 ## How it works
 
-Reddit exposes a public JSON API by simply appending `.json` to any URL:
-- `reddit.com/r/programming.json` → subreddit posts
-- `reddit.com/r/programming/new.json` → new posts
-- `reddit.com/comments/{id}.json` → post with comments
-- `reddit.com/search.json?q=query` → post search results
-- `reddit.com/subreddits/search.json?q=query` → subreddit search results
-- `reddit.com/r/{subreddit}/about.json` → subreddit metadata
+Reddit exposes a JSON API by appending `.json` to any path — fetched
+same-origin from inside the tab:
 
-No authentication required, just a custom User-Agent header to avoid rate limiting.
+| Path | Returns |
+|------|---------|
+| `/search.json?q=…` | sitewide post search |
+| `/r/<sub>/search.json?restrict_sr=1&q=…` | in-subreddit post search |
+| `/r/<sub>/<sort>.json` | subreddit listing (hot/new/top/rising) |
+| `/comments/<id>.json` | a post + its full comment tree |
+| `/subreddits/search.json?q=…` | subreddit search |
+| `/r/<sub>/about.json` | subreddit metadata |
+| `/api/me.json` | who am I (the honest auth signal) |
 
-## Rate Limits
+## Login
 
-- ~10 requests per minute without OAuth
-- Sufficient for browsing and casual use
+Logged-out reads work. Sign in to read *your* Reddit (subscriptions,
+personalized ranking) — Reddit's sign-in has bot-detection on the POST, so it's
+the `login_window` kind of the login protocol (the outlook.py pattern):
+
+1. `reddit.login` opens a chromeless sign-in window on the engine's background
+   profile (a headed flip) and returns an `auth_challenge`
+   (`kind: "login_window"`, `continueWith: "check_session"`).
+2. You sign in (username + password + any 2FA) in that window.
+3. Poll `reddit.check_session` until it returns `authenticated: true`.
+4. `browser.login_window(close=true)` — flip the profile back to its headless
+   daemon (the session already persisted).
+
+The session persists in the engine's background profile — the exact profile
+every headless read uses — no re-auth across engine restarts.
 
 ## Usage
 
 | Operation | Description |
 |-----------|-------------|
-| `search_posts` | Search posts across all of Reddit |
-| `list_posts` | List posts from a specific subreddit |
-| `get_post` | Get a single post with comments |
+| `search_posts` | Search posts sitewide or within a subreddit (`sort`, `time`) |
+| `list_posts` | List a subreddit's posts (`sort`: hot/new/top/rising) |
+| `get_post` | A post + its nested comment tree (also `web_fetch` for reddit URLs) |
+| `comments_post` | A post + its comments flattened into `post[]` with `replies_to` edges |
 | `search_communities` | Search for subreddits |
-| `get_community` | Get metadata for a specific subreddit |
+| `get_community` | Subreddit metadata |
+| `check_session` / `login` / `logout` | The account trio (session = bg profile) |
 
-## Examples
+## Entity model
 
-```bash
-# Search for posts about TypeScript
-GET /api/posts/search?query=typescript+tips
+- **post** — `name` (title), `content` (selftext/body), `url`, `author`,
+  `published`, `score`, `commentCount`, `posted_by` (→ `account`),
+  `published_in` (→ `community`). A comment is a `post` that `replies_to`
+  another.
+- **community** — `name` (subreddit), `content` (public description), `url`,
+  `image`, `subscriberCount`.
 
-# List hot posts from r/programming  
-GET /api/posts?subreddit=programming
+## Behavior notes
 
-# Get a specific post
-GET /api/posts/abc123
-```
-
-```bash
-# Using adapter endpoints directly
-POST /api/adapters/reddit/post.search
-{"query": "rust programming", "limit": 10}
-
-POST /api/adapters/reddit/post.list
-{"subreddit": "programming", "sort": "hot"}
-
-POST /api/adapters/reddit/post.get
-{"id": "1abc234"}
-
-# Search for subreddits
-GET /api/groups/search?query=rust
-
-# Get subreddit info
-GET /api/groups/programming
-```
+- First read after an engine restart is slower (~2-5s): browser attach + page
+  load + JS-challenge clear. Warm reads run in well under a second.
+- A `403` from a read means bot-detection got through the browser profile
+  (unexpected from a real browser) — a `login` usually clears it.

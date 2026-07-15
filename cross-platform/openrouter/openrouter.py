@@ -4,7 +4,6 @@ import json
 from datetime import datetime, timezone
 
 from agentos import connection, provides, returns, test, client
-from agentos.services import llm
 
 
 connection(
@@ -41,6 +40,16 @@ def _ts_to_iso(ts) -> str | None:
         return None
 
 
+def _per_mtok(per_token) -> float | None:
+    """OpenRouter prices per token (USD, as a string); the graph stores USD per
+    1,000,000 tokens (the unit the engine's computed-cost path multiplies).
+    None when the field is absent; a malformed present value raises — a bad
+    price is loud, never silently coerced to 0."""
+    if per_token in (None, ""):
+        return None
+    return float(per_token) * 1_000_000
+
+
 @test
 @returns("model[]")
 @connection("api")
@@ -51,14 +60,19 @@ async def list_models(**params) -> list[dict]:
     for m in (resp["json"] or {}).get("data", []):
         provider_slug = m.get("id", "").split("/")[0] if m.get("id") else None
         at = {"shape": "organization", "name": provider_slug.title()} if provider_slug else None
+        pricing = m.get("pricing") or {}
         results.append({
             "id": m.get("id"),
             "name": m.get("name"),
             "at": at,
             "content": m.get("description"),
             "published": _ts_to_iso(m.get("created")),
-            "modelType": "llm",
+            "modelType": "chat",
             "contextWindow": int(m["context_length"]) if m.get("context_length") else None,
+            # The graph IS the engine's price table — populate it so a call the
+            # provider didn't itself price can be costed from here.
+            "pricingInput": _per_mtok(pricing.get("prompt")),
+            "pricingOutput": _per_mtok(pricing.get("completion")),
         })
     return results
 
@@ -91,7 +105,7 @@ def _to_openai_msg(msg: dict) -> dict:
 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
-@provides(llm, models=["opus", "sonnet", "haiku", "gpt-4o", "gpt-4o-mini", "llama3.3", "claude-opus-4-6", "claude-sonnet-4-5"])
+@provides("chat", serves=["*"])
 @returns({"content": "{'type': 'string', 'description': 'Text response from the model (null if tool calls only)'}", "tool_calls": "{'type': 'array', 'description': 'Tool calls the model wants to make'}", "stop_reason": "{'type': 'string', 'enum': ['end_turn', 'tool_use', 'max_tokens']}", "usage": "{'type': 'object', 'description': 'Token usage (input_tokens, output_tokens)'}"})
 @connection("api")
 async def chat(*, model: str, messages: list, tools: list = None, max_tokens: int = 4096, temperature: float = 0, system: str = None, **params) -> dict:
@@ -107,6 +121,12 @@ async def chat(*, model: str, messages: list, tools: list = None, max_tokens: in
         "messages": openai_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        # Ask OpenRouter to embed the real generation cost in `usage.cost` —
+        # ground-truth spend the broker records, not a price-table estimate.
+        "usage": {"include": True},
+        # Surface the model's thinking (content + reasoning_tokens) for reasoning
+        # models; a non-reasoning model ignores this, so it's safe to always send.
+        "reasoning": {"enabled": True},
     }
     if tools:
         body["tools"] = [
@@ -123,7 +143,18 @@ async def chat(*, model: str, messages: list, tools: list = None, max_tokens: in
 
     resp = await client.post(f"{API_BASE}/chat/completions",
                      json=body, headers=_auth_header(params))
-    data = resp["json"]
+    data = resp["json"] or {}
+    # Surface an API failure as a real error. OpenRouter answers a bad model id,
+    # auth failure, or rate limit with a non-2xx (or a 200 carrying an
+    # `{"error": {...}}` envelope); left unchecked, `data` has no `choices` and
+    # this returns a benign `content:null, stop_reason:"end_turn"` — which the
+    # agent loop misreads as a successful empty turn instead of the failed run it
+    # is. Raise so the engine records the failure (ExecutionResult.error) and the
+    # loop records the run with status "error".
+    if not resp.get("ok", True) or data.get("error"):
+        err = data.get("error")
+        msg = err.get("message") if isinstance(err, dict) else (err or "request failed")
+        raise RuntimeError(f"OpenRouter chat failed (HTTP {resp.get('status')}): {msg}")
     choices = data.get("choices") or [{}]
     choice = choices[0] if choices else {}
     message = choice.get("message") or {}
@@ -149,12 +180,23 @@ async def chat(*, model: str, messages: list, tools: list = None, max_tokens: in
     )
 
     usage = data.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
     return {
+        # The model OpenRouter actually routed to (e.g. "openai/gpt-4o-mini" for
+        # the "gpt-4o-mini" alias) — the honest record and the graph pricing key.
+        "model": data.get("model"),
         "content": message.get("content"),
+        # The model's thinking, when it exposes it — recorded as a reasoning block.
+        "reasoning": message.get("reasoning"),
         "tool_calls": tool_calls,
         "stop_reason": stop_reason,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
+            # Thinking tokens (a subset of completion) — surfaced for the record.
+            "reasoning_tokens": details.get("reasoning_tokens", 0),
+            # Real USD cost of this generation (present with usage.include);
+            # the broker reads it as `reported` spend.
+            "cost": usage.get("cost"),
         },
     }

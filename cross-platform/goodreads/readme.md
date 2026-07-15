@@ -16,6 +16,12 @@ product:
 
 Read your Goodreads profile, books, reviews, friends, and activity without needing an official API key.
 
+> **Before extending this app** (dev only), read:
+> 1. [Browser-Driven Connectors](browser-driven on the system volume)
+> 2. [dev/requirements.md](./dev/requirements.md) — RE notes / GraphQL inventory
+>
+> **Layout** — runtime = `readme.md` + top-level tools (`goodreads_web.py`, `public_graph.py`); RE = `dev/` (never injected).
+
 ## Setup
 
 Goodreads discontinued their public API in 2020. This app uses **session-based authentication** through your browser cookies.

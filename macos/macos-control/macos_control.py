@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agentos import file_info, file_list, file_read, provides, returns, shell, test, timeout, volume_transport
+from agentos import provides, returns, shell, test, timeout
 
 
 # ── Full Disk Access / TCC ────────────────────────────────────────────────
@@ -763,7 +763,7 @@ SORT_KEYS = {
 
 @test(params={'path': '/etc'})
 @returns({"path": "string", "entries": "{'type': 'array', 'description': 'File and folder entries with shape-compatible fields'}", "count": "integer"})
-@provides(file_list)
+@provides("file_list")
 @timeout(10)
 async def list_directory(*, path=None, show_hidden=False, sort=None, **_kwargs):
     """List contents of a directory. Returns file and folder shapes."""
@@ -793,7 +793,7 @@ async def list_directory(*, path=None, show_hidden=False, sort=None, **_kwargs):
 
 
 @returns({"name": "string", "path": "string", "content": "string", "encoding": "string", "mimeType": "string", "size": "integer"})
-@provides(file_read)
+@provides("file_read")
 @timeout(10)
 async def read_file(*, path, **_kwargs):
     """Read file contents. Text as UTF-8 string, binary as base64."""
@@ -1016,7 +1016,7 @@ def _get_finder_favorites():
 
 
 @returns({"provider": "string", "providerName": "string", "home": "string", "specialFolders": "{'type': 'object', 'description': 'Well-known folders: desktop, documents, downloads'}", "volumes": "{'type': 'array', 'description': 'Mounted volumes with capacity and filesystem info'}"})
-@provides(file_info)
+@provides("file_info")
 @timeout(15)
 async def get_info(**_kwargs):
     """Get filesystem info — home dir, special folders, volumes, Finder favorites."""
@@ -1292,7 +1292,7 @@ async def list_shortcuts(**_kwargs):
 
 @test(params={})
 @returns({"volumes": "{'type': 'array', 'description': 'Transport announce rows: name, kind, address, capacity'}", "count": "integer"})
-@provides(volume_transport)
+@provides("volume_transport")
 @timeout(15)
 async def list_volumes(**_kwargs):
     """Announce mounted filesystem volumes — internal disk, DMGs, USB drives.

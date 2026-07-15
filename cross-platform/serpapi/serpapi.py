@@ -1,6 +1,6 @@
 """SerpAPI — Google Flights search via the SerpAPI proxy."""
 
-from agentos import connection, flight_search, provides, returns, test, client
+from agentos import connection, provides, returns, test, client
 
 
 connection(
@@ -130,7 +130,7 @@ async def _flight_get(query: dict, **params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("offer[]")
-@provides(flight_search)
+@provides("flight_search")
 @connection("api")
 async def search_offers(*, departure_id: str, arrival_id: str, outbound_date: str, return_date: str = None, type: int = 1, travel_class: int = 1, adults: int = 1, children: int = None, stops: int = None, max_price: int = None, sort_by: int = None, include_airlines: str = None, exclude_airlines: str = None, currency: str = "USD", hl: str = "en", gl: str = None, deep_search: bool = None, **params) -> list[dict]:
     """Search Google Flights for flight offers between airports

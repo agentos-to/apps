@@ -2,6 +2,7 @@
 id: gmail
 services:
   - http
+  - blobs
 name: Gmail
 description: "Full-featured Gmail — read, search, send, reply, forward, label, archive, draft, attachments, filters, and batch operations. Auth can use the shared `google` OAuth service when a provider integration is available."
 color: "#EA4335"
@@ -16,6 +17,12 @@ product:
 # Gmail
 
 Full-featured email via the [Gmail REST API](https://developers.google.com/gmail/api) — read, search, send, reply, forward, label, archive, draft, attachments, filters, and batch operations.
+
+> **Before extending this app** (dev only), read:
+> 1. [Adding Login](apps-adding-login on the system volume) — Google OAuth path
+> 2. [dev/requirements.md](./dev/requirements.md) — API / shape notes
+>
+> **Layout** — runtime = `readme.md` + `gmail.py`; RE = `dev/` (never injected).
 
 ## Agent Guidance
 

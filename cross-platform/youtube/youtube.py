@@ -8,7 +8,7 @@ directly (no subprocess, no temp files, no jq).
 import glob
 import sys
 import json
-from agentos import provides, returns, test, web_read, client
+from agentos import provides, returns, test, client
 
 # Add yt-dlp's own site-packages to path (stable symlink, version-agnostic)
 _ytdlp_paths = glob.glob("/opt/homebrew/opt/yt-dlp/libexec/lib/python*/site-packages")
@@ -61,13 +61,15 @@ def _map_flat_entry(e: dict) -> dict:
         "viewCount": e.get("view_count"),
     }
     if channel_id:
-        result["channel"] = {
+        result["on"] = {
+            "shape": "channel",
             "id": channel_id,
             "name": channel,
             "url": e.get("channel_url"),
         }
     if playlist_id:
-        result["addTo"] = {
+        result["added_to"] = {
+            "shape": "playlist",
             "id": playlist_id,
             "name": playlist,
             "url": f"{SITE}/playlist?list={playlist_id}",
@@ -97,7 +99,8 @@ def _map_full_info(info: dict) -> dict:
         "commentCount": info.get("comment_count"),
     }
     if channel_id:
-        result["channel"] = {
+        result["on"] = {
+            "shape": "channel",
             "id": channel_id,
             "name": channel,
             "url": info.get("channel_url"),
@@ -173,7 +176,7 @@ async def get_video(url: str, **params) -> dict:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("video")
-@provides(web_read, urls=["youtube.com/*", "youtu.be/*", "music.youtube.com/*"])
+@provides("web_fetch", urls=["youtube.com/*", "youtu.be/*", "music.youtube.com/*"])
 async def transcript_video(url: str, lang: str = "en", format: str = "text", **params) -> dict:
     """Fetch video metadata + transcript. No temp files — captions fetched in memory."""
     with _ydl() as ydl:
@@ -312,12 +315,14 @@ async def list_posts(url: str, limit: int = 50, **params) -> list[dict]:
             ),
             "likes": c.get("like_count"),
             "posted_by": {
+                "shape": "account",
                 "id": author_id,
                 "name": c.get("author"),
                 "url": c.get("author_url"),
                 "image": c.get("author_thumbnail"),
             } if author_id else None,
             "replies_to": {
+                "shape": "post",
                 "id": video_post_id if parent == "root" else parent,
             },
         }

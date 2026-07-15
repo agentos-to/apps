@@ -16,6 +16,12 @@ product:
 
 Search products, get details, and access your Amazon account. No API keys.
 
+> **Before extending this app** (dev only), read:
+> 1. [Browser-Driven Connectors](browser-driven on the system volume)
+> 2. [dev/requirements.md](./dev/requirements.md) — RE notes / API inventory
+>
+> **Layout** — runtime = `readme.md` + `amazon.py`; RE = `dev/` (never injected).
+
 Two halves, two substrates:
 
 - **Public** (`search_suggestions`, `search_products`, `get_product`) —
@@ -41,11 +47,13 @@ only the transport changed.
 
 Amazon's sign-in is email + password + frequent OTP/CAPTCHA, fronted by
 heavy anti-bot (Lightsaber), with no stable form to drive blind. So
-`login` does **not** attempt to drive it — it returns a NeedsAuth error
-telling you to **sign in once, headed, at amazon.com in the AgentOS
-browser**. After that the session lives in the browser profile and every
-account op rides it. `check_session` and `logout` are fully implemented
-against the tab.
+`login` opens a headed `login_window` on the engine's background profile,
+**polls `check_session` until the session is live**, closes the window,
+and returns the registered account. If you haven't finished within ~4
+minutes it returns a `login_window` auth_challenge so the agent can keep
+polling. `check_session` gates on the httpOnly `at-main` cookie + homepage
+identity (customerId / Hello name) — Login & Security email is optional
+because Amazon often MFA-gates that page even on a live session.
 
 ## Features
 
@@ -59,10 +67,11 @@ against the tab.
 - **`get_order`** — Full order details: per-item prices and quantities, order summary (subtotal, shipping, tax, grand total), shipping address, delivery status, and tracking URL.
 - **`buy_again`** — Products Amazon recommends for repurchase. Returns ASIN, title, price, Prime eligibility.
 - **`subscriptions`** — Active Subscribe & Save subscriptions with delivery frequency, next delivery date, upcoming scheduled deliveries, edit deadlines, and total savings.
+- **`list_lists`** / **`get_list`** — Wishlists and shopping lists (`lists` capability). Items are `product` rows with `dateAdded` from the painted DOM; pagination via `/hz/wishlist/slv/items` HTML AJAX (not GraphQL).
 
 ### Account (browser-driven)
-- **`check_session`** — Verify your Amazon session is active and identify the logged-in account. Returns display name, customer ID, marketplace, and Prime status. Reads the homepage + Login & Security pages inside the amazon.com tab.
-- **`login`** — Reports the live session, or returns NeedsAuth telling you to sign in once headed (Amazon OTP/CAPTCHA is best cleared by a human).
+- **`check_session`** — Verify the session (`at-main` cookie + homepage identity). Prefers email as the account identifier — from Login & Security, or from the prefilled `ap-claim` on Amazon's MFA/signin step-up. `customerId` rides `userId` / metadata.
+- **`login`** — Reports the live session, or opens a headed sign-in window, waits until authenticated, auto-closes, and returns the account.
 - **`logout`** — Drives Amazon's own sign-out in the tab, clearing the session from the browser profile.
 
 ## Setup
@@ -75,9 +84,9 @@ against the tab.
 
 ### Account Operations (browser-driven)
 
-1. Sign in to [amazon.com](https://www.amazon.com) **once, headed, in the AgentOS browser**. Amazon's login (email + password + OTP/CAPTCHA) is best cleared by a human.
-2. The session lands in the browser profile. Every account op runs same-origin inside that profile's amazon.com tab — nothing is extracted or vaulted.
-3. Sessions last weeks to months. When one expires, `check_session` reports `authenticated: false`; sign in headed again.
+1. Run `amazon.login` — it opens a headed sign-in window. Complete Amazon's login (email / password / OTP / CAPTCHA) there.
+2. `login` detects the live session (`at-main` + homepage identity), closes the window, and registers the account. The session lives in the browser profile.
+3. Sessions last weeks to months. When one expires, `check_session` reports `authenticated: false`; run `login` again.
 
 ## Graph Model
 
@@ -165,7 +174,13 @@ Siege client-side-encryption workaround (stripping `csd-key` / `csm-hit` /
 
 ### Order History Page
 
-The order history page is **pure server-rendered HTML** — no hidden JSON or GraphQL API exists for orders. The page uses `.order-card` containers with `li.order-header__header-list-item` elements for date, total, ship-to, and order ID, plus `.yohtmlc-item` containers for product line items. The amazon.com tab fetches this HTML same-origin and the existing lxml parsers handle it unchanged.
+The order history page is **server-rendered HTML** with progressive enhancement —
+no GraphQL/Relay order API. Card bodies are **Siege-encrypted on the wire**:
+a same-origin `fetch()` returns ciphertext. After the tab paints,
+`SiegeClientSideDecryption` unlocks the markup (`.order-card`,
+`.yohtmlc-order-id`, `.yohtmlc-item`, …). `list_orders` navigates and reads
+that painted DOM, then feeds it to the existing lxml parsers. Same instinct as
+WhatsApp / Messenger: hook the local unlock, not the wire.
 
 ### ASIN Format
 
@@ -207,7 +222,8 @@ No JSON-LD or GraphQL endpoints are exposed publicly.
 
 ### Known Issues
 - Cookie provider freshness — stale cookies from inactive browsers override fresh ones (backlog `wcya9y`)
-- Siege encryption — Amazon's `csd-key` cookie triggers client-side encrypted HTML; must be stripped
+- Siege encryption — Amazon encrypts order-card HTML on the wire; unlock via
+  `SiegeClientSideDecryption` / painted DOM (`_get_painted_html`), never raw fetch
 - Chrome version drift — `Sec-Ch-Ua` headers must match a real browser version; currently pinned to Chrome 145
 
 ## Limitations

@@ -1,5 +1,4 @@
 from agentos import client, connection, provides, returns, timeout
-from agentos.services import llm
 
 
 connection(
@@ -41,7 +40,7 @@ def _map_model(m: dict) -> dict:
         "name": m.get("display_name"),
         "at": _ANTHROPIC,
         "published": m.get("created_at"),
-        "modelType": "llm",
+        "modelType": "chat",
     }
 
 
@@ -72,7 +71,7 @@ async def list_models(**params) -> list:
     return [_map_model(m) for m in (resp["json"] or {}).get("data", [])]
 
 
-@provides(llm)
+@provides("chat", serves=["opus", "sonnet", "haiku", "claude-*"])
 @returns({"content": "string", "tool_calls": "array", "stop_reason": "string", "usage": "object"})
 @connection("api")
 @timeout(120)
@@ -104,6 +103,8 @@ async def chat(*, model: str, messages: list, tools: list = None,
     data = resp["json"]
     blocks = data.get("content", [])
     return {
+        # The model the API resolved to — the honest record + graph pricing key.
+        "model": data.get("model"),
         "content": next((b["text"] for b in blocks if b.get("type") == "text"), None),
         "tool_calls": [{"id": b["id"], "name": b["name"], "input": b["input"]}
                        for b in blocks if b.get("type") == "tool_use"],

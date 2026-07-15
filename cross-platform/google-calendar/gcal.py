@@ -8,7 +8,7 @@ import base64
 import re
 from datetime import datetime, timedelta, timezone
 
-from agentos import connection, provides, returns, test, timeout, web_read, client, url
+from agentos import connection, provides, returns, test, timeout, client, url
 
 connection(
     'api',
@@ -77,6 +77,7 @@ def _map_location(location_str):
     name = parts[0].strip()
     has_numbers = bool(re.search(r'\d', name))
     return {
+        "shape": "place",
         "name": name,
         "fullAddress": location_str if len(parts) > 1 else None,
         "featureType": "address" if has_numbers else "poi",
@@ -99,6 +100,7 @@ def _map_attendee(att):
     name = att.get("displayName") or _derive_name_from_email(email)
     parts = name.split(None, 1) if name else []
     return {
+        "shape": "person",
         "name": name,
         "handle": email,
         "givenName": parts[0] if parts else None,
@@ -121,6 +123,7 @@ def _map_person_from_gcal(person):
     name = person.get("displayName") or _derive_name_from_email(email)
     parts = name.split(None, 1) if name else []
     return {
+        "shape": "person",
         "name": name,
         "handle": email,
         "givenName": parts[0] if parts else None,
@@ -231,7 +234,7 @@ def _map_event(event):
         "endDate": end.get("dateTime") or end.get("date"),
         "timezone": start.get("timeZone"),
         "allDay": "date" in start and "dateTime" not in start,
-        "location": _map_location(event.get("location")),
+        "held_at": _map_location(event.get("location")),
         "calendarLink": event.get("htmlLink"),
         # Conference (R8)
         "isVirtual": bool(event.get("conferenceData")),
@@ -244,8 +247,8 @@ def _map_event(event):
         "recurringEventId": event.get("recurringEventId"),
         "originalStartTime": (event.get("originalStartTime") or {}).get("dateTime"),
         # Relations
-        "organizer": _map_person_from_gcal(event.get("organizer")),
-        "author": _map_person_from_gcal(event.get("creator")),
+        "organized_by": _map_person_from_gcal(event.get("organizer")),
+        "created_by": _map_person_from_gcal(event.get("creator")),
         "involves": [_map_attendee(a) for a in attendees if not a.get("resource")],
         # Status & type (R4-R5)
         "status": event.get("status"),
@@ -409,7 +412,7 @@ async def list_events(*, calendar_id="primary", days=7, past=False,
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("event")
-@provides(web_read, urls=["calendar.google.com/*"])
+@provides("web_fetch", urls=["calendar.google.com/*"])
 @connection("api")
 @timeout(15)
 async def get_event(*, id=None, url=None, calendar_id="primary", **params):
@@ -511,6 +514,53 @@ async def update_event(*, id, calendar_id="primary", title=None, start=None, end
     resp = await client.patch(
         f"{BASE_URL}/calendars/{calendar_id}/events/{id}",
         json=body, headers=headers,
+    )
+    return _map_event(resp["json"])
+
+
+_RSVP_RESPONSES = {"accepted", "declined", "tentative"}
+
+
+@test.skip(reason='destructive or unsupported — migrated from yaml')
+@returns("event")
+@connection("api")
+@timeout(15)
+async def respond_event(*, response, ical_uid=None, id=None, calendar_id="primary", **params):
+    """Answer a calendar invite — Yes/No/Maybe — by PATCHing the self
+    attendee's responseStatus. The one RSVP-write gap: reads already
+    surface `rsvp` (`_map_attendee`); this closes the loop.
+
+    Resolves the event by `ical_uid` (RFC 5545 UID — the cross-system dedup
+    key an invite's meeting/invitation nodes carry) when `id` isn't already
+    known."""
+    if response not in _RSVP_RESPONSES:
+        raise ValueError(f"response must be one of {sorted(_RSVP_RESPONSES)}, got {response!r}")
+    headers = _auth_header(params)
+
+    if not id:
+        if not ical_uid:
+            raise ValueError("Either id or ical_uid is required")
+        resp = await client.get(
+            f"{BASE_URL}/calendars/{calendar_id}/events",
+            params={"iCalUID": ical_uid, "singleEvents": "true"}, headers=headers,
+        )
+        items = (resp["json"] or {}).get("items", [])
+        if not items:
+            raise ValueError(f"No event found with icalUid {ical_uid!r}")
+        id = items[0]["id"]
+
+    resp = await client.get(f"{BASE_URL}/calendars/{calendar_id}/events/{id}", headers=headers)
+    event = resp["json"]
+    attendees = event.get("attendees", [])
+    self_attendee = next((a for a in attendees if a.get("self")), None)
+    if not self_attendee:
+        raise ValueError("No self attendee on this event — nothing to respond as")
+    self_attendee["responseStatus"] = response
+
+    resp = await client.patch(
+        f"{BASE_URL}/calendars/{calendar_id}/events/{id}",
+        params={"sendUpdates": "all"},
+        json={"attendees": attendees}, headers=headers,
     )
     return _map_event(resp["json"])
 

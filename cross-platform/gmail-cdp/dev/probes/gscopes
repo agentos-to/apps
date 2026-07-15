@@ -1,0 +1,11 @@
+#!/bin/bash
+# gscopes: browser.scopes
+set -euo pipefail
+EXPR="${1:?usage: gscopes 'expr' [grep]}"
+GREP="${2:-}"
+if [ -n "$GREP" ]; then
+FULL=$(python3 -c "import json,sys; print(json.dumps({'op':'browser_session','params':{'verb':'scopes','target':'mail.google.com','mode':'background','expr':sys.argv[1],'grep':sys.argv[2]}}))" "$EXPR" "$GREP")
+else
+FULL=$(python3 -c "import json,sys; print(json.dumps({'op':'browser_session','params':{'verb':'scopes','target':'mail.google.com','mode':'background','expr':sys.argv[1]}}))" "$EXPR")
+fi
+agentos call services "$FULL"

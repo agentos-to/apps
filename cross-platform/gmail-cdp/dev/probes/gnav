@@ -1,0 +1,9 @@
+#!/bin/bash
+# gnav: navigate bg tab
+set -euo pipefail
+URL="${1:?usage: gnav https://mail.google.com/...}"
+FULL=$(python3 -c "
+import json,sys
+print(json.dumps({'op':'browser_session','params':{'verb':'navigate','target':'mail.google.com','mode':'background','url':sys.argv[1]}}))
+" "$URL")
+agentos call services "$FULL"

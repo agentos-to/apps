@@ -15,7 +15,7 @@ Cursor, etc.) can use AgentOS as its tool surface. Your data stays on
 your machine.
 
 Apps are how services arrive. An app declares what it
-**provides** — `@provides(llm)`, `@provides(web_search)`,
+**provides** — `@provides("chat")`, `@provides("web_search")`,
 `@provides(file_system)` — and the engine matchmakes requests to the
 best available provider. Callers ask for a service, not a specific
 app.

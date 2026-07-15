@@ -1,6 +1,6 @@
 """Firecrawl — browser-rendered web scraping via API."""
 
-from agentos import connection, provides, returns, web_read, client
+from agentos import connection, provides, returns, client
 
 
 connection(
@@ -14,8 +14,8 @@ connection(
 API_BASE = "https://api.firecrawl.dev/v2"
 
 
-@returns("webpage")
-@provides(web_read)
+@returns("document")
+@provides("web_fetch")
 @connection("api")
 async def read_webpage(*, url: str, wait_for_js: int = 0, timeout: int = 30000, **params) -> dict:
     """Read a URL with browser rendering (handles JS-heavy sites)."""

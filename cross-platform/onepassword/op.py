@@ -523,15 +523,32 @@ async def verify_local_unlock(
 @provides("login_credentials", description="Reads {email, password} from 1Password Login items matching a domain")
 @connection("local")
 async def get_credentials(*, domain: str, account: str | None = None, **params) -> dict[str, Any]:
-    """Match a Login item for ``domain``; return email/password via ``__secrets__``."""
+    """Match a Login item for ``domain``; return email/password via ``__secrets__``.
+
+    Honors ``required`` (from ``credentials.retrieve``): email-OTP sites
+    like Exa only need ``["email"]`` — do not demand a password field.
+    """
     for_app = _for_app_from(params)
+    required = params.get("required") or []
+    if isinstance(required, str):
+        required = [required]
+    need_email = not required or any(
+        r in ("email", "username", "identifier") for r in required
+    )
+    need_password = (not required) or ("password" in required)
     try:
         items = await _list_category("Login")
         scored = [(it, _score_login(it, domain)) for it in items]
         scored = [(it, s) for it, s in scored if s >= _MIN_SCORE]
         if account:
             acc = account.lower()
-            narrowed = [(it, s) for it, s in scored if _as_text(it.get("title")).lower() == acc]
+            narrowed = [
+                (it, s)
+                for it, s in scored
+                if _as_text(it.get("title")).lower() == acc
+                or _as_text(it.get("title")).lower().startswith(acc)
+            ]
+            # Also match by username once we load details — pre-filter by title first.
             if narrowed:
                 scored = narrowed
         if not scored:
@@ -553,16 +570,28 @@ async def get_credentials(*, domain: str, account: str | None = None, **params) 
         fields = _field_map(item)
         username = _f(fields, "username")
         password = _f(fields, "password")
-        if not username or not password:
+        if need_email and not username:
             return {"provided": False}
-        identifier = normalize_email(username) if "@" in username else username
+        if need_password and not password:
+            return {"provided": False}
+        if not username and not password:
+            return {"provided": False}
+        identifier = normalize_email(username) if username and "@" in username else (username or "")
+        if not identifier:
+            return {"provided": False}
+        value: dict[str, Any] = {"email": identifier}
+        if password:
+            value["password"] = password
         secret = app_secret(
             domain=domain,
             identifier=identifier,
             item_type="login_credentials",
-            value={"email": identifier, "password": password},
+            value=value,
             source="onepassword",
-            metadata={"masked": {"password": "••••••••"}, **_op_meta(item)},
+            metadata={
+                "masked": ({"password": "••••••••"} if password else {}),
+                **_op_meta(item),
+            },
         )
         return {
             "__secrets__": [secret],

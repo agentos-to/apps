@@ -20,26 +20,26 @@ Two halves, two substrates:
 Native-interface note: the browser tab IS a warm, real Amazon session, so
 the whole cookie-vault era's anti-bot machinery (custom client hints,
 ``skip_cookies`` to drop ``csd-key``/``csm-hit``/``aws-waf-token``, the
-homepage session-warming hop) is *gone* — those existed only to fake a
-real browser, and the tab no longer needs faking. We still fetch the same
-endpoint paths and feed their HTML to the same lxml parsers; only the
-transport changed.
+homepage session-warming hop) is *gone* for auth. Order history still goes
+through Amazon Siege (client-side HTML decryption): we navigate and read
+the painted DOM after ``SiegeClientSideDecryption`` unlocks the cards —
+never parse a raw ``fetch()`` of Your Orders (that's ciphertext).
 
 Amazon's sign-in is email + password + frequent OTP/CAPTCHA, fronted by
 heavy anti-bot (Lightsaber). There is no stable form to drive blind, so
-``login`` returns a NeedsAuth ``app_error``: the human signs in once headed
-in the AgentOS browser, after which the session lives in the profile and
-every account op rides it. ``check_session`` + ``logout`` are fully
-implemented against the tab.
+``login`` opens a headed ``login_window``, polls until the session is live
+(``at-main`` + homepage identity), closes the window, and returns the
+account. ``check_session`` + ``logout`` are fully implemented against the tab.
 """
 
 import json
 import re
 import sys
 import asyncio
+import time
 from typing import Any
 
-from agentos import account, app_error, claims, client, connection, molt, normalize_email, parse_int, returns, services, test, timeout, url
+from agentos import account, browser_session, claims, client, connection, molt, normalize_email, parse_int, provides, returns, services, test, timeout, url
 from lxml import html as lhtml
 from lxml.html import HtmlElement
 
@@ -54,14 +54,25 @@ connection(
 # Browser-session transport — every account op runs as a same-origin fetch()
 # evaluated inside the www.amazon.com tab of the engine-owned browser. The
 # session is the browser profile; nothing is extracted or vaulted.
-# Template: apps/web/exa/exa.py, apps/dev/greptile/greptile.py,
-# apps/logistics/uber/uber.py.
+# Template: apps/cross-platform/exa/exa.py, apps/cross-platform/greptile/greptile.py,
+# apps/cross-platform/uber/uber.py.
 # ───────────────────────────────────────────────────────────────────────────
 
 # browser_session target — a URL substring; the engine opens
 # https://<target>/ in the engine-owned browser when no tab matches. One tab
 # per registrable domain: www.amazon.com (and its amazon.com family).
 _TARGET = "www.amazon.com"
+
+# Honest session cookie — httpOnly, invisible to document.cookie. Present ⇒
+# account ops will work; absent ⇒ genuinely logged out. Same gate Instagram
+# uses for `sessionid` (see apps-browser-driven § "The honest account check").
+_SESSION_COOKIE = "at-main"
+
+# How long `login` waits for the human after opening the headed window before
+# returning the auth_challenge for the agent to keep polling. Fits under the
+# engine's 10m login_window abandon timer.
+_LOGIN_WAIT_S = 240
+_LOGIN_POLL_S = 2.0
 
 
 # Readiness wait, prepended to every op body. A freshly opened tab is still
@@ -90,7 +101,8 @@ async def _eval(body: str, *, timeout_s: int = 45):
     body runs only once the tab has settled on an amazon.com origin, with
     ``__onApp`` in scope (False when Amazon bounced us to the sign-in flow).
     """
-    return await services.call(services.browser_session, params={
+    return await services.call("browser_session", verb="eval", params={
+        "mode": "background",  # headless bg profile (rule 19) — never the daily browser
         "target": _TARGET,
         "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
         "timeout": timeout_s,
@@ -135,6 +147,11 @@ def _check_tab(resp, *, what: str) -> dict:
         raise RuntimeError(
             f"SESSION_EXPIRED: no live Amazon session in the AgentOS browser profile ({what})."
         )
+    if err == "paint_timeout":
+        raise RuntimeError(
+            f"{what}: page loaded but Siege never painted plaintext "
+            f"(url={resp.get('url')})"
+        )
     if err:
         raise RuntimeError(f"{what} failed in the tab: {err}")
     return resp
@@ -145,6 +162,9 @@ async def _get_html(u: str, *, headers=None, what: str) -> str:
 
     Raises SESSION_EXPIRED if the tab is logged out or Amazon bounced the
     request to the sign-in page.
+
+    Prefer ``_get_painted_html`` for Your Orders / anything Siege-encrypts —
+    a raw fetch returns ciphertext even same-origin.
     """
     resp = _check_tab(await _tab_request("GET", u, headers=headers), what=what)
     status = resp.get("status") or 0
@@ -157,6 +177,154 @@ async def _get_html(u: str, *, headers=None, what: str) -> str:
     if status != 200:
         raise RuntimeError(f"Amazon HTTP {status} ({what}) url={url_final}")
     return body
+
+
+async def _get_painted_html(u: str, *, ready_sel: str, what: str, timeout_s: int = 60) -> str:
+    """Return post-Siege (plaintext) HTML for a Siege-encrypted Amazon page.
+
+    Amazon's Your Orders cards are Siege-encrypted on the wire: a same-origin
+    ``fetch()`` returns ciphertext that only ``SiegeClientSideDecryption``
+    unlocks in-page. Same instinct as WhatsApp / Messenger — if it paints,
+    something local decrypted it; read *that*, don't parse the wire.
+
+    Preferred path (avoids a full navigation that can force Amazon's
+    ``max_auth_age=0`` order step-up): fetch the HTML in the live tab → mount
+    the ``order-card`` nodes into a hidden host → let Siege decrypt (or call
+    ``decryptInElementWithId``) → return a synthetic document of plaintext
+    cards for the existing lxml parsers.
+
+    Falls back to navigate + scrape when the fetch path can't paint.
+    """
+    value = await _eval(
+        f"""
+if (!__onApp) return {{ __error: 'session_expired' }};
+const pageUrl = {json.dumps(u)};
+const readySel = {json.dumps(ready_sel)};
+
+const r = await fetch(pageUrl, {{
+  credentials: 'include',
+  cache: 'no-store',
+  headers: {{ 'Referer': location.href }},
+}});
+const text = await r.text();
+if (/\\/ap\\/signin|\\/ap\\/mfa/.test(r.url) || /name=["']email["']/.test(text.slice(0, 4000))) {{
+  return {{ __error: 'session_expired', url: r.url }};
+}}
+
+const doc = new DOMParser().parseFromString(text, 'text/html');
+const cards = [...doc.querySelectorAll('div.order-card, div.order')];
+if (cards.length === 0) {{
+  // Nothing to decrypt — return the fetch body as-is (may already be plain).
+  return {{ status: r.status, url: r.url, body: text, via: 'fetch-plain' }};
+}}
+
+// Already plaintext? (no Siege scripts, yohtmlc markers present)
+const alreadyPlain = cards.some(c =>
+  c.querySelector('.yohtmlc-order-id, li.order-header__header-list-item, [data-component="orderId"]')
+  && !/SiegeClientSideDecryption/i.test(c.innerHTML));
+if (alreadyPlain) {{
+  return {{ status: r.status, url: r.url, body: text, via: 'fetch-plain' }};
+}}
+
+// Mount into the LIVE document so Siege can unlock (wire ciphertext → DOM).
+const host = document.createElement('div');
+host.id = 'aos-siege-host';
+host.setAttribute('data-aos', 'siege-orders');
+host.style.cssText = 'position:fixed;left:-14000px;top:0;width:960px;height:1px;overflow:hidden;opacity:0;pointer-events:none;';
+host.innerHTML = cards.map(c => c.outerHTML).join('');
+document.body.appendChild(host);
+
+const S = window.SiegeClientSideDecryption;
+if (S && typeof S.decryptInElementWithId === 'function') {{
+  for (const el of host.querySelectorAll('[id]')) {{
+    try {{
+      const out = S.decryptInElementWithId(el.id);
+      if (out && typeof out.then === 'function') await out;
+    }} catch (e) {{}}
+  }}
+  try {{
+    if (typeof S.bootstrap === 'function') {{
+      const b = S.bootstrap();
+      if (b && typeof b.then === 'function') await b;
+    }}
+  }} catch (e) {{}}
+}}
+
+// Wait until mounted cards show plaintext markers (Siege finished).
+const deadline = Date.now() + 12000;
+while (Date.now() < deadline) {{
+  if (host.querySelector(readySel)) break;
+  await new Promise(r => setTimeout(r, 150));
+}}
+
+const painted = host.querySelector(readySel);
+const paintedCards = [...host.querySelectorAll('div.order-card, div.order')];
+const num = doc.querySelector('.num-orders');
+const pager = doc.querySelector('ul.a-pagination');
+if (painted) {{
+  const parts = [];
+  if (num) parts.push(num.outerHTML);
+  if (pager) parts.push(pager.outerHTML);
+  parts.push(...paintedCards.map(c => c.outerHTML));
+  const body = '<!doctype html><html><body>' + parts.join('\\n') + '</body></html>';
+  const n = paintedCards.length;
+  host.remove();
+  return {{ status: 200, url: r.url, body, via: 'siege-mount', cards: n }};
+}}
+
+host.remove();
+// Fallback: full navigation — only if mount decrypt failed.
+return {{ __error: 'siege_mount_failed', url: r.url, cardCount: cards.length }};
+""",
+        timeout_s=timeout_s,
+    )
+
+    if isinstance(value, dict) and value.get("__error") == "siege_mount_failed":
+        # Last resort: navigate and scrape the painted page.
+        await browser_session.navigate(_TARGET, u, timeout=timeout_s)
+        value = await _eval(
+            f"""
+if (!__onApp) return {{ __error: 'session_expired' }};
+const readySel = {json.dumps(ready_sel)};
+const deadline = Date.now() + 20000;
+while (Date.now() < deadline) {{
+  if (location.pathname.indexOf('/ap/signin') !== -1
+      || location.pathname.indexOf('/ap/mfa') !== -1) {{
+    return {{ __error: 'session_expired' }};
+  }}
+  if (document.querySelector(readySel)) break;
+  await new Promise(r => setTimeout(r, 200));
+}}
+if (location.pathname.indexOf('/ap/signin') !== -1
+    || location.pathname.indexOf('/ap/mfa') !== -1) {{
+  return {{ __error: 'session_expired' }};
+}}
+if (!document.querySelector(readySel)) {{
+  return {{ __error: 'paint_timeout', url: location.href }};
+}}
+await new Promise(r => setTimeout(r, 400));
+return {{ status: 200, url: location.href, body: document.documentElement.outerHTML, via: 'navigate' }};
+""",
+            timeout_s=timeout_s,
+        )
+
+    resp = _check_tab(value, what=what)
+    body = resp.get("body") or ""
+    url_final = resp.get("url") or ""
+    if "ap/signin" in url_final or _is_login_redirect_body(body):
+        raise RuntimeError(
+            f"SESSION_EXPIRED: Amazon redirected to login ({what}) — sign in headed."
+        )
+    return body
+
+
+# Decrypted-order signal: yohtmlc markers / header list items only exist after
+# SiegeClientSideDecryption has unlocked the card bodies.
+_ORDERS_READY_SEL = (
+    "div.order-card .yohtmlc-order-id, "
+    "div.order-card li.order-header__header-list-item, "
+    "div.order-card [data-component='orderId']"
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -639,28 +807,64 @@ DETAIL_STATUS_SEL = SHIPMENT_STATUS_SEL + ["h4"]
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("order[]")
+@provides("order_history", account_param="account")
 @connection("none")
-async def list_orders(*, filter=None, page=1, **params) -> list[dict[str, Any]]:
+async def list_orders(*, account=None, filter=None, page=1, limit=None, **params) -> list[dict[str, Any]]:
     """List Amazon orders from the order history page.
 
-    Fetches the order-history HTML same-origin in the www.amazon.com tab —
-    the session rides the browser profile — and parses it with lxml.
+    Navigates the www.amazon.com tab to Your Orders and parses the
+    **post-Siege** DOM. Order-card bodies are Siege-encrypted on the wire —
+    a same-origin ``fetch()`` returns ciphertext; after paint,
+    ``SiegeClientSideDecryption`` has unlocked the markup the lxml parsers
+    already understand. Same instinct as WhatsApp / Messenger: hook the
+    local unlock, not the wire.
+
+    Brokered as the `order_history` capability: the Shopping Commons app (and
+    any future orders surface) fans this out per connected account and merges,
+    never naming Amazon. `account` rides the run so a multi-account future pins
+    each read; today the single browser-profile session answers regardless.
+
+    ``limit`` (Shopping Load more) walks pagination until filled or exhausted.
+    ``page`` alone still fetches a single Amazon page (~10 cards).
     """
     order_filter = filter or "last30"
     page = int(page or 1)
+    want = int(limit) if limit not in (None, "", 0) else None
+    if want is not None:
+        want = max(1, min(want, 200))
 
-    url_params: dict[str, str] = {"timeFilter": order_filter}
-    if page > 1:
-        url_params["startIndex"] = str((page - 1) * 10)
+    async def _fetch_page(page_i: int) -> dict[str, Any]:
+        url_params: dict[str, str] = {"timeFilter": order_filter}
+        if page_i > 1:
+            url_params["startIndex"] = str((page_i - 1) * 10)
+        body = await _get_painted_html(
+            url.build(f"{BASE}/your-orders/orders", params=url_params),
+            ready_sel=_ORDERS_READY_SEL,
+            what="list_orders",
+        )
+        return _parse_order_history(body, page=page_i, order_filter=order_filter)
 
-    body = await _get_html(
-        url.build(f"{BASE}/your-orders/orders", params=url_params),
-        headers={"Referer": f"{BASE}/gp/homepage.html"},
-        what="list_orders",
-    )
+    if want is None:
+        return (await _fetch_page(page))["orders"]
 
-    result = _parse_order_history(body, page=page, order_filter=order_filter)
-    return result["orders"]
+    out: list[dict[str, Any]] = []
+    page_i = 1
+    seen: set[str] = set()
+    while len(out) < want and page_i <= 40:
+        result = await _fetch_page(page_i)
+        for o in result["orders"]:
+            oid = str(o.get("orderId") or o.get("id") or "")
+            if oid and oid in seen:
+                continue
+            if oid:
+                seen.add(oid)
+            out.append(o)
+            if len(out) >= want:
+                break
+        if not result.get("hasNext"):
+            break
+        page_i += 1
+    return out[:want]
 
 
 def _parse_order_history(
@@ -682,19 +886,27 @@ def _parse_order_history(
 
     for card in order_cards:
         order_id_tag = _select_one(card, ORDER_ID_SEL)
-        order_id = _text(order_id_tag)
-        if order_id:
-            order_id = order_id.strip().lstrip("#").strip()
-        if not order_id or not re.match(r"\d{3}-\d{7}-\d{7}", order_id):
+        order_id_raw = _text(order_id_tag) or ""
+        # Live cards often render "Order #\\n 111-…" — extract the id, don't
+        # require the whole string to be bare.
+        m_id = re.search(r"\d{3}-\d{7}-\d{7}", order_id_raw)
+        if not m_id:
+            slot = card.get("data-csa-c-slot-id") or ""
+            m_id = re.search(r"\d{3}-\d{7}-\d{7}", slot)
+        order_id = m_id.group(0) if m_id else None
+        if not order_id:
             continue
 
         order_date = None
         total = None
         for li in card.cssselect("li.order-header__header-list-item"):
             li_text = _text(li) or ""
-            if "Order placed" in li_text:
-                order_date = re.sub(r"^.*?Order [Pp]laced\s*", "", li_text).strip()
-            elif li_text.lstrip().startswith("Total"):
+            if re.search(r"Order\s+placed", li_text, re.I):
+                order_date = re.sub(
+                    r"^.*?Order\s+[Pp]laced\s*", "", li_text, flags=re.I
+                ).strip()
+                order_date = re.sub(r"\s+", " ", order_date).strip() or None
+            elif re.match(r"Total\b", li_text.lstrip(), re.I):
                 m = re.search(r"\$[\d,.]+", li_text)
                 total = m.group() if m else None
 
@@ -872,9 +1084,16 @@ def _parse_order_items(card: HtmlElement, *, detail_page: bool = False) -> list[
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("product[]")
+@provides("product_feed", account_param="account")
 @connection("none")
-async def buy_again(**params) -> list[dict[str, Any]]:
-    """Get products Amazon recommends for repurchase."""
+async def buy_again(*, account=None, **params) -> list[dict[str, Any]]:
+    """Get products Amazon recommends for repurchase.
+
+    Brokered as the `product_feed` capability — the account's shelf of
+    likely-repurchase products. The Shopping app reads it the same way it
+    reads `order_history`; a future provider (Uber's reorder shelf) lights up
+    for free by declaring the same `@provides`.
+    """
 
     body = await _get_html(
         f"{BASE}/gp/buyagain",
@@ -930,88 +1149,111 @@ def _parse_buy_again(body: str) -> list[dict[str, Any]]:
 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
-@returns({"subscriptions": "array", "subscriptionCount": "integer", "upcomingDeliveries": "array", "totalSavings": "string"})
+@returns("membership[]")
+@provides("memberships", account_param="account")
 @connection("none")
-@timeout(45)
-async def subscriptions(**params) -> dict[str, Any]:
-    """List active Subscribe & Save subscriptions and upcoming deliveries."""
+@timeout(60)
+async def subscriptions(*, account=None, **params) -> list[dict[str, Any]]:
+    """List active Subscribe & Save subscriptions as ``membership`` rows.
 
-    mgmt_body = await _get_html(
-        f"{BASE}/gp/subscribe-and-save/manager/viewsubscriptions",
-        headers={"Referer": f"{BASE}/your-orders/orders"},
-        what="subscriptions",
+    Brokered as the ``memberships`` capability — Shopping (and any future
+    "what am I subscribed to" surface) fans this out per account. Amazon's
+    Subscribe & Save is a commerce subscription; we emit the shared
+    ``membership`` shape (status/price/billing cadence) so gym plans and
+    SNS share one list. Navigate the live tab and scrape painted cards —
+    the ajax fragment's title often lives only in ``img[alt]``.
+    """
+    await browser_session.navigate(
+        _TARGET,
+        f"{BASE}/auto-deliveries/subscriptionList",
+        timeout=60,
     )
+    raw = await _eval("""
+if (!__onApp) return { __error: 'session_expired' };
+const deadline = Date.now() + 20000;
+while (Date.now() < deadline) {
+  if (location.pathname.indexOf('/ap/signin') !== -1) return { __error: 'session_expired' };
+  if (document.querySelectorAll('[data-subscription-id]').length > 0) {
+    await new Promise(r => setTimeout(r, 600));
+    break;
+  }
+  await new Promise(r => setTimeout(r, 200));
+}
+const cards = [...document.querySelectorAll('[data-subscription-id]')];
+const items = cards.map(el => {
+  const id = el.getAttribute('data-subscription-id') || '';
+  const img = el.querySelector('img');
+  const trunc = el.querySelector('span.a-truncate-full, .a-truncate-cut');
+  let title = (trunc && trunc.textContent || '').trim();
+  if (!title && img) title = (img.getAttribute('alt') || '').trim();
+  if (!title) {
+    const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+    title = t.split('Next delivery')[0].trim().slice(0, 160);
+  }
+  const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+  let nextDelivery = null;
+  const nm = text.match(
+    /Next delivery by\\s*([A-Za-z]+\\s+\\d{1,2}(?:,?\\s*\\d{4})?)/i,
+  );
+  if (nm) nextDelivery = nm[1].trim();
+  let frequency = null;
+  const fm = text.match(/(\\d+\\s+unit[s]?\\s+every\\s+\\d+\\s+(?:month|week|day)s?)/i)
+    || text.match(/every\\s+\\d+\\s+(?:month|week|day)s?/i);
+  if (fm) frequency = fm[1].trim();
+  const priceEl = el.querySelector('.a-price .a-offscreen, .a-color-price');
+  const price = priceEl ? (priceEl.textContent || '').trim() : null;
+  const imageUrl = img
+    ? (img.getAttribute('data-a-hires') || img.getAttribute('data-src') || img.getAttribute('src') || null)
+    : null;
+  return { subscriptionId: id, title, nextDelivery, frequency, price, imageUrl };
+}).filter(x => x.subscriptionId && x.title);
+return { items, url: location.href, count: items.length };
+""", timeout_s=60)
+    data = _check_tab(raw, what="subscriptions")
+    items = data.get("items") or []
+    return [_sns_to_membership(it) for it in items]
 
-    mgmt_soup = _parse(mgmt_body)
 
-    ship_id = None
-    for tab in mgmt_soup.cssselect("[role='tab']"):
-        href = tab.get("href", "")
-        m = re.search(r"shipId=([^&]+)", href)
-        if m:
-            ship_id = m.group(1)
-            break
+def _sns_to_membership(it: dict[str, Any]) -> dict[str, Any]:
+    """Subscribe & Save card → ``membership`` shape."""
+    sub_id = str(it.get("subscriptionId") or "")
+    title = molt(it.get("title")) or f"Subscribe & Save {sub_id}"
+    price = it.get("price")
+    frequency = it.get("frequency")
+    next_delivery = it.get("nextDelivery")
+    billing = None
+    if isinstance(frequency, str):
+        if re.search(r"every\s+1\s+month|every\s+month", frequency, re.I):
+            billing = "monthly"
+        elif re.search(r"every\s+(\d+)\s+month", frequency, re.I):
+            billing = "monthly"
+        elif re.search(r"week", frequency, re.I):
+            billing = "weekly"
 
-    deliveries: list[dict[str, Any]] = []
-    for card in mgmt_soup.cssselect(".delivery-card"):
-        date_el = (card.cssselect("h2") or [None])[0]
-        date_text = _text(date_el) if date_el is not None else None
-        full_text = " ".join(card.text_content().split())
-
-        edit_deadline = None
-        m = re.search(r"Last day to edit.*?:\s*(\S.*?)(?:\s*You|$)", full_text)
-        if m:
-            edit_deadline = m.group(1).strip()
-
-        item_count = None
-        m = re.search(r"(\d+)\s+items?\s+in\s+this\s+delivery", full_text)
-        if m:
-            item_count = int(m.group(1))
-
-        if date_text:
-            deliveries.append({
-                "deliveryDate": date_text,
-                "editDeadline": edit_deadline,
-                "itemCount": item_count,
-            })
-
-    savings = None
-    savings_el = (mgmt_soup.cssselect("h1") or [None])[0]
-    if savings_el is not None:
-        m = re.search(r"\$([\d,.]+)", _text(savings_el) or "")
-        if m:
-            savings = f"${m.group(1)}"
-
-    items: list[dict[str, Any]] = []
-    if ship_id:
-        ajax_resp = _check_tab(
-            await _tab_request(
-                "GET",
-                url.build(f"{BASE}/auto-deliveries/ajax/subscriptionList", params={
-                    "deviceType": "desktop",
-                    "deviceContext": "web",
-                    "shipId": ship_id,
-                }),
-                headers={
-                    "Referer": f"{BASE}/auto-deliveries/subscriptionList",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Accept": "text/html, */*",
-                },
-            ),
-            what="subscriptions_ajax",
-        )
-        if ajax_resp.get("status") == 200:
-            items = _parse_subscriptions(ajax_resp.get("body") or "")
-
-    return {
-        "totalSavings": savings,
-        "upcomingDeliveries": deliveries,
-        "subscriptions": items,
-        "subscriptionCount": len(items),
+    out: dict[str, Any] = {
+        "id": sub_id,
+        "name": title,
+        "status": "active",
+        "autoRenew": True,
+        "tier": "Subscribe & Save",
+        "billingType": billing,
+        "price": _parse_price(price) if price else None,
+        "currency": "USD",
+        "url": f"{BASE}/auto-deliveries/subscriptionList",
+        "image": it.get("imageUrl"),
+        "content": " · ".join(
+            p for p in (frequency, f"Next: {next_delivery}" if next_delivery else None) if p
+        ) or None,
+        # SNS-native fields for the Shopping shelf (not all are membership vals).
+        "frequency": frequency,
+        "nextDelivery": next_delivery,
+        "subscriptionId": sub_id,
     }
+    return out
 
 
 def _parse_subscriptions(body: str) -> list[dict[str, Any]]:
+    """Legacy ajax-fragment parser — kept for debugging; live path scrapes the DOM."""
     soup = _parse(body)
     items: list[dict[str, Any]] = []
 
@@ -1020,6 +1262,10 @@ def _parse_subscriptions(body: str) -> list[dict[str, Any]]:
 
         title_el = (el.cssselect("span.a-truncate-full") or [None])[0]
         title = molt(_text(title_el))
+        if not title:
+            img0 = (el.cssselect("img") or [None])[0]
+            if img0 is not None:
+                title = molt(img0.get("alt"))
         if not title:
             continue
 
@@ -1223,22 +1469,23 @@ LIST_ITEM_SEL = [
     "li[data-itemid]",
 ]
 
-ITEM_TITLE_SEL = [
+LIST_ITEM_TITLE_SEL = [
     "a[id^='itemName_']",
     "h2 a.a-link-normal[title]",
+    "a.a-link-normal[title]",
 ]
 
-ITEM_PRICE_SEL = [
+LIST_ITEM_PRICE_SEL = [
     ".price-section .a-price .a-offscreen",
     ".a-price .a-offscreen",
 ]
 
-ITEM_RATING_SEL = [
+LIST_ITEM_RATING_SEL = [
     ".a-icon-star-small span.a-icon-alt",
     "i.a-icon-star-small span.a-icon-alt",
 ]
 
-ITEM_REVIEW_COUNT_SEL = [
+LIST_ITEM_REVIEW_COUNT_SEL = [
     "a[id^='review_count_']",
     "a.a-link-normal[aria-label]",
 ]
@@ -1248,9 +1495,16 @@ MAX_LIST_PAGES = 20
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("list[]")
+@provides("lists", account_param="account")
 @connection("none")
-async def list_lists(**params) -> list[dict[str, Any]]:
-    """List all of the user's Amazon lists (wishlists, shopping lists, etc.)."""
+async def list_lists(*, account=None, **params) -> list[dict[str, Any]]:
+    """List all of the user's Amazon lists (wishlists, shopping lists, etc.).
+
+    Brokered as the ``lists`` capability — Shopping fans this out per account
+    and nests each wishlist under the account tree. Items load via the
+    sibling ``get_list`` verb (HTML + ``/hz/wishlist/slv/items`` AJAX — no
+    GraphQL on this surface).
+    """
 
     body = await _get_html(
         f"{BASE}/hz/wishlist/ls",
@@ -1280,7 +1534,6 @@ def _parse_lists_nav(body: str) -> list[dict[str, Any]]:
         privacy = _text(privacy_el)
 
         is_default = bool(entry.cssselect("#list-default-collaborator-label"))
-        is_selected = "selected" in (entry.get("class") or "").split()
 
         list_type = None
         href = link.get("href", "")
@@ -1290,12 +1543,16 @@ def _parse_lists_nav(body: str) -> list[dict[str, Any]]:
                 list_type = m.group(1)
 
         lists.append({
+            "id": link_id,
             "listId": link_id,
             "name": name,
             "url": f"{BASE}/hz/wishlist/ls/{link_id}",
             "privacy": privacy,
+            "isPublic": (privacy or "").lower() == "public",
             "isDefault": is_default,
             "listType": list_type or "WishList",
+            "member_shape": "product",
+            "ordering_mode": "unordered",
         })
 
     return lists
@@ -1306,7 +1563,13 @@ def _parse_lists_nav(body: str) -> list[dict[str, Any]]:
 @connection("none")
 @timeout(60)
 async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
-    """Get items from a specific Amazon list by list ID."""
+    """Get a wishlist (or shopping list) with its product items.
+
+    Sibling of ``list_lists`` — Shopping opens one via
+    ``services.lists {verb: get_list, list_id}``. Pagination is Amazon's
+    HTML AJAX ``/hz/wishlist/slv/items`` (token in ``scrollState``); each
+    item carries ``dateAdded`` from the painted ``itemAddedDate_*`` span.
+    """
     if not list_id:
         raise ValueError("get_list requires a list_id parameter")
     item_filter = filter or "unpurchased"
@@ -1336,10 +1599,11 @@ async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
     if remember_state:
         list_type = remember_state.get("listType")
 
-    page_items = _parse_list_items(soup)
+    page_items = _parse_list_items(soup, list_id=list_id, list_name=list_name)
     for item in page_items:
-        if item["asin"] not in seen:
-            seen.add(item["asin"])
+        key = item.get("asin") or item.get("id")
+        if key and key not in seen:
+            seen.add(str(key))
             all_items.append(item)
 
     for _ in range(MAX_LIST_PAGES - 1):
@@ -1367,14 +1631,15 @@ async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
         ajax_body = ajax_resp.get("body") or ""
         ajax_soup = _parse(ajax_body)
 
-        page_items = _parse_list_items(ajax_soup)
+        page_items = _parse_list_items(ajax_soup, list_id=list_id, list_name=list_name)
         if not page_items:
             break
 
         new_count = 0
         for item in page_items:
-            if item["asin"] not in seen:
-                seen.add(item["asin"])
+            key = item.get("asin") or item.get("id")
+            if key and str(key) not in seen:
+                seen.add(str(key))
                 all_items.append(item)
                 new_count += 1
         if new_count == 0:
@@ -1383,13 +1648,17 @@ async def get_list(*, list_id, filter=None, **params) -> dict[str, Any]:
         soup = ajax_soup
 
     return {
+        "id": list_id,
         "listId": list_id,
         "name": list_name,
         "url": f"{BASE}/hz/wishlist/ls/{list_id}",
         "privacy": list_privacy,
-        "listType": list_type,
+        "isPublic": (list_privacy or "").lower() == "public",
+        "listType": list_type or "WishList",
+        "member_shape": "product",
         "ordering_mode": "unordered",
         "itemCount": len(all_items),
+        "items": all_items,
     }
 
 
@@ -1404,7 +1673,17 @@ def _extract_a_state(soup: HtmlElement, key: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_list_items(soup: HtmlElement) -> list[dict[str, Any]]:
+def _parse_list_items(
+    soup: HtmlElement,
+    *,
+    list_id: str | None = None,
+    list_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Wishlist row HTML → ``product`` dicts (with SNS-style extras).
+
+    ``dateAdded`` is only in the painted DOM (``Item added …``) — Amazon's
+    wishlist AJAX returns HTML fragments, not GraphQL JSON.
+    """
     items: list[dict[str, Any]] = []
 
     for li in _select(soup, LIST_ITEM_SEL):
@@ -1424,37 +1703,63 @@ def _parse_list_items(soup: HtmlElement) -> list[dict[str, Any]]:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        title_el = _select_one(li, ITEM_TITLE_SEL)
+        title_el = _select_one(li, LIST_ITEM_TITLE_SEL)
         title = None
-        if title_el:
+        if title_el is not None:
             title = title_el.get("title") or _text(title_el)
             if not asin:
-                href = title_el.get("href", "")
+                href = title_el.get("href", "") or ""
                 m = re.search(r"/dp/([A-Z0-9]{10})", href)
                 if m:
                     asin = m.group(1)
+        if not title:
+            trunc = (
+                (li.cssselect("span.a-truncate-full") or [None])[0]
+                or (li.cssselect(".a-truncate-cut") or [None])[0]
+            )
+            title = _text(trunc)
 
         if not asin:
             continue
 
-        price_el = _select_one(li, ITEM_PRICE_SEL)
+        price_el = _select_one(li, LIST_ITEM_PRICE_SEL)
         price = _text(price_el)
 
         byline_el = (li.cssselect("span[id^='item-byline-']") or [None])[0]
         byline = _text(byline_el)
 
-        rating_el = _select_one(li, ITEM_RATING_SEL)
+        rating_el = _select_one(li, LIST_ITEM_RATING_SEL)
         rating_text = _text(rating_el)
 
-        review_el = _select_one(li, ITEM_REVIEW_COUNT_SEL)
+        review_el = _select_one(li, LIST_ITEM_REVIEW_COUNT_SEL)
         review_text = _text(review_el)
         review_count = None
         if review_text:
             clean = re.sub(r"[^\d]", "", review_text)
             review_count = int(clean) if clean else None
 
-        img_el = (li.cssselect(f"#itemImage_{item_id} img") or li.cssselect("img[alt]") or [None])[0]
-        image_url = str(img_el.get("src", "")) if img_el is not None else None
+        img_el = (li.cssselect(f"#itemImage_{item_id} img") or li.cssselect("img") or [None])[0]
+        image_url = None
+        if img_el is not None:
+            image_url = (
+                img_el.get("data-a-hires")
+                or img_el.get("data-src")
+                or img_el.get("src")
+                or None
+            )
+            if image_url and "grey-pixel" in image_url:
+                image_url = None
+            if not title:
+                alt = (img_el.get("alt") or "").strip()
+                if alt and not re.fullmatch(r"[A-Z0-9]{10}", alt):
+                    title = alt
+
+        if not asin:
+            continue
+        # Prefer a real title; never ship the ASIN as the display name.
+        name = molt(title) if title else None
+        if not name or name == asin:
+            name = molt(byline) or f"Amazon item {asin}"
 
         date_el = (li.cssselect("span[id^='itemAddedDate_']") or [None])[0]
         date_added = _text(date_el)
@@ -1468,18 +1773,26 @@ def _parse_list_items(soup: HtmlElement) -> list[dict[str, Any]]:
         comment = _text(comment_el)
 
         items.append({
+            "id": asin,
             "asin": asin,
-            "title": molt(title),
+            "itemId": item_id,
+            "name": name,
+            "title": name,
             "url": f"{BASE}/dp/{asin}",
+            "image": image_url,
             "imageUrl": image_url,
+            "author": molt(byline),
             "byline": molt(byline),
             "price": price,
             "priceAmount": _parse_price(price),
             "rating": _parse_rating(rating_text),
             "ratingsCount": review_count,
             "dateAdded": date_added,
+            "content": f"Added {date_added}" if date_added else None,
             "priority": priority,
             "comment": comment if comment else None,
+            "listId": list_id,
+            "listName": list_name,
         })
 
     return items
@@ -1491,42 +1804,105 @@ def _parse_list_items(soup: HtmlElement) -> list[dict[str, Any]]:
 
 
 _AMAZON = {"shape": "organization", "url": "https://amazon.com", "name": "Amazon"}
+_LOGIN_URL = "https://www.amazon.com/gp/sign-in.html"
+
+
+def _email_from_amazon_html(body: str) -> str | None:
+    """Pull the account email from Amazon HTML — manage page OR step-up.
+
+    Login & Security often redirects to ``/ap/signin`` / ``/ap/mfa`` with a
+    possession challenge. That challenge page still pre-fills the claim:
+
+        <input type="hidden" name="email" value="you@example.com" id="ap-claim"/>
+
+    So the email is available without clearing MFA. Prefer that over a
+    free-text regex (which picks up marketing addresses).
+    """
+    if not body:
+        return None
+    for pat in (
+        r'id=["\']ap-claim["\'][^>]*value=["\']([^"\']+@[^"\']+)["\']',
+        r'value=["\']([^"\']+@[^"\']+)["\'][^>]*id=["\']ap-claim["\']',
+        r'name=["\']email["\'][^>]*value=["\']([^"\']+@[^"\']+)["\']',
+        r'data-claim=["\']([^"\']+@[^"\']+)["\']',
+        r'auth-text-truncate["\']>\s*([\w.+-]+@[\w.-]+\.[a-z]{2,})\s*<',
+    ):
+        m = re.search(pat, body, re.I)
+        if not m:
+            continue
+        candidate = m.group(1).strip()
+        if re.search(r"amazon\.|example\.|sentry|aws|cloudfront", candidate, re.I):
+            continue
+        return normalize_email(candidate)
+    return None
+
+
+async def _close_login_window() -> None:
+    """Flip the background profile back to its headless daemon after sign-in."""
+    await services.call(
+        "browser_session",
+        verb="login_window",
+        params={"close": True},
+    )
 
 
 async def _account_identity() -> dict[str, Any] | None:
     """Read the signed-in Amazon identity from inside the tab, or None.
 
-    Fetches the homepage (for customerId / marketplace / Prime / display
-    name) and the Login & Security page (for the canonical email) same-origin
-    in the www.amazon.com tab. Returns None when no live session is present
-    (tab bounced to sign-in, or no email available).
+    Honest gate first: the httpOnly ``at-main`` cookie. Then the homepage
+    (customerId / marketplace / Prime / display name). Email comes from
+    Login & Security when Amazon serves it, or from the prefilled claim on
+    the MFA/signin step-up page — either way we prefer email as the
+    account identifier. ``customerId`` stays as ``userId`` / metadata.
     """
+    if not await browser_session.session_cookie_present(_TARGET, _SESSION_COOKIE):
+        return None
+
     try:
         body = await _get_html(f"{BASE}/gp/css/homepage.html", what="check_session")
     except RuntimeError:
         return None
 
-    customer_id = re.search(r'"customerId"\s*:\s*"([A-Z0-9]+)"', body)
+    customer_id_m = re.search(r'"customerId"\s*:\s*"([A-Z0-9]+)"', body)
     marketplace = re.search(r"ue_mid\s*=\s*'([^']+)'", body)
     is_prime = bool(re.search(r"isPrimeMember[=:]\s*['\"]?true", body, re.I))
-    display = re.search(
+    display_m = re.search(
         r"""\$Nav\.declare\(['"]config\.customerName['"],\s*'([^']+)'\)""",
         body,
     )
+    if not display_m:
+        display_m = re.search(
+            r'class="nav-line-1[^"]*"[^>]*>\s*Hello,\s*([^<]+)',
+            body,
+            re.I,
+        )
+    customer_id = customer_id_m.group(1) if customer_id_m else None
+    display = display_m.group(1).strip() if display_m else None
 
-    # Login & Security is behind a step-up challenge for most sessions.
-    # No email = no identity — treat the session as not-authenticated.
-    try:
-        manage_body = await _get_html(f"{BASE}/ax/account/manage", what="check_session_manage")
-    except RuntimeError:
+    # A live session always exposes customerId (and usually the Hello name).
+    # Cookie alone isn't enough — at-main can linger briefly after logout.
+    if not customer_id and not display:
         return None
-    em = re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", manage_body)
-    if not em:
+
+    email: str | None = None
+    try:
+        manage_resp = _check_tab(
+            await _tab_request("GET", f"{BASE}/ax/account/manage"),
+            what="check_session_manage",
+        )
+        # Works on the manage page itself AND on the MFA/signin claim page
+        # Amazon serves when it wants a step-up — both carry the email.
+        email = _email_from_amazon_html(manage_resp.get("body") or "")
+    except RuntimeError:
+        pass
+
+    identifier = email or customer_id or display
+    if not identifier:
         return None
 
     metadata: dict[str, Any] = {}
     if customer_id:
-        metadata["customerId"] = customer_id.group(1)
+        metadata["customerId"] = customer_id
     if marketplace:
         metadata["marketplaceId"] = marketplace.group(1)
     if is_prime:
@@ -1535,29 +1911,26 @@ async def _account_identity() -> dict[str, Any] | None:
     result: dict[str, Any] = {
         "authenticated": True,
         "at": _AMAZON,
-        "identifier": normalize_email(em.group(0)),
-        "email": normalize_email(em.group(0)),
+        "identifier": identifier,
     }
+    if email:
+        result["email"] = email
     if display:
-        result["displayName"] = display.group(1).strip()
+        result["displayName"] = display
     if customer_id:
-        result["userId"] = customer_id.group(1)
+        result["userId"] = customer_id
     if metadata:
         result["metadata"] = {"amazon": metadata}
     return result
 
 
 def _needs_auth():
-    return app_error(
+    return browser_session.needs_auth(
         "No live Amazon session in the AgentOS browser profile. Amazon's "
         "login (email + password + frequent OTP/CAPTCHA, fronted by "
-        "Lightsaber anti-bot) is best cleared by a human. Open the headed "
-        "sign-in window for them: call the `login_window` service with "
-        "url=https://www.amazon.com/gp/sign-in.html, poll check_session "
-        "until authenticated, then login_window(close=true). The session "
-        "lands in the profile and these account ops just work.",
-        code="NeedsAuth",
-        login_url="https://www.amazon.com/gp/sign-in.html",
+        "Lightsaber anti-bot) is best cleared by a human.",
+        login_op="amazon.login",
+        login_url=_LOGIN_URL,
     )
 
 
@@ -1570,14 +1943,11 @@ def _needs_auth():
 async def check_session(**params) -> dict[str, Any]:
     """Verify the Amazon session and identify the logged-in account.
 
-    The session lives in the engine-owned browser profile; this op asks
-    Amazon's own homepage + Login & Security pages from inside the
-    www.amazon.com tab. No cookie ever reaches the app.
-
-    Identity is keyed on the account email scraped from `/ax/account/manage`.
-    When Amazon gates that page behind a step-up challenge, or no live session
-    is present, we return `authenticated: false`. Service-specific fields
-    (customerId, marketplaceId, isPrime) ride in `metadata.amazon`.
+    Honest gate: httpOnly ``at-main`` cookie, then homepage identity
+    (customerId / Hello name). Email is the preferred ``identifier`` —
+    scraped from Login & Security, or from the prefilled ``ap-claim`` on
+    Amazon's MFA/signin step-up when that page is gated. ``customerId``
+    rides ``userId`` / ``metadata.amazon``.
     """
     identity = await _account_identity()
     if not identity:
@@ -1585,25 +1955,74 @@ async def check_session(**params) -> dict[str, Any]:
     return identity
 
 
+async def _orders_reachable() -> bool:
+    """True iff order history answers without bouncing to sign-in.
+
+    Amazon's soft session (homepage Hello + ``at-main``) is not enough for
+    Your Orders — those pages force ``max_auth_age=0`` reauth. ``login`` uses
+    this so a soft session still opens the headed window for the step-up.
+    """
+    try:
+        resp = _check_tab(
+            await _tab_request(
+                "GET",
+                f"{BASE}/your-orders/orders?timeFilter=last30",
+                headers={"Referer": f"{BASE}/"},
+            ),
+            what="orders_probe",
+        )
+    except RuntimeError:
+        return False
+    url_final = resp.get("url") or ""
+    body = resp.get("body") or ""
+    if any(tok in url_final for tok in ("/ap/signin", "/ap/mfa", "/ap/cvf")):
+        return False
+    if _is_login_redirect_body(body):
+        return False
+    return (resp.get("status") or 0) == 200
+
+
 @account.login
 @returns("account | auth_challenge")
 @connection("none")
-@timeout(60)
+@timeout(300)
 async def login(**params) -> dict[str, Any]:
-    """Report the live Amazon session — or tell the user to sign in headed.
+    """Sign in to Amazon — or report the already-live session.
 
-    Returns the `account` when the browser profile already holds a live
-    amazon.com session. Otherwise returns a NeedsAuth `app_error`: Amazon's
-    sign-in is email + password + frequent OTP/CAPTCHA, fronted by heavy
-    anti-bot (Lightsaber), with no stable form shape to drive blind. The
-    durable, safe move is for the human to sign in once headed in the AgentOS
-    browser; the session then lives in the profile and every account op rides
-    it.
+    Returns the ``account`` when the browser profile already holds a session
+    that can read order history. A soft homepage session alone is not enough
+    — Amazon step-ups Your Orders — so this opens a headed sign-in window,
+    **polls until authenticated AND orders are reachable**, closes the window,
+    and returns the registered account. If the human hasn't finished within
+    ~4 minutes, returns a ``login_window`` ``auth_challenge`` so the agent can
+    keep polling ``check_session`` and close later.
     """
     identity = await _account_identity()
-    if identity:
+    if identity and await _orders_reachable():
         return identity
-    return _needs_auth()
+
+    challenge = await browser_session.login_window(_LOGIN_URL, label="Amazon")
+    deadline = time.monotonic() + _LOGIN_WAIT_S
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_LOGIN_POLL_S)
+        identity = await _account_identity()
+        if identity and await _orders_reachable():
+            try:
+                await _close_login_window()
+            except Exception:
+                pass
+            return identity
+
+    # Still signing in — leave the window open; agent keeps polling.
+    if isinstance(challenge, dict):
+        challenge["instructions"] = (
+            "Amazon sign-in window is still open. Finish signing in (OTP/"
+            "CAPTCHA / any 'confirm it's you' step for Your Orders), then "
+            "poll amazon.check_session until authenticated. When done, call "
+            "the login_window service with close=true to return the profile "
+            "to its headless daemon."
+        )
+    return challenge
 
 
 @account.logout

@@ -1,5 +1,5 @@
 import re
-from agentos import connection, provides, returns, test, web_read, client
+from agentos import connection, provides, returns, test, client
 
 
 connection(
@@ -112,14 +112,14 @@ async def filter_task(*, filter: str, **params) -> list:
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("task")
-@provides(web_read, urls=["app.todoist.com/*/task/*", "todoist.com/*/task/*"])
+@provides("web_fetch", urls=["app.todoist.com/*/task/*", "todoist.com/*/task/*"])
 @connection("api")
 async def get_task(*, id: str = None, url: str = None, **params) -> dict:
     """Get a specific task by ID
 
         Args:
             id: Task ID — optional if url is an app.todoist.com task link
-            url: Todoist task URL from the app (web_read)
+            url: Todoist task URL from the app (web_fetch)
         """
     headers = _auth_header(params)
     if url:

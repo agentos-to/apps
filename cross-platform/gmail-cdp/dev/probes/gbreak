@@ -1,0 +1,77 @@
+#!/bin/bash
+# gbreak — browser.breakpoint / script_source helpers for Gmail RE
+#   gbreak expr '_m.snd' [condition]
+#   gbreak url 'cb=loaded_0' 775 [col] [condition]
+#   gbreak wait url 'cb=loaded_3' 4579 --trigger '(async()=>__agmail.createFilter(...))()'
+#   gbreak wait expr '_m.V1k.prototype.E0b' --trigger '...'
+#   gbreak remove '4:4578:148:25'
+#   gbreak src loaded_3
+set -euo pipefail
+python3 - "$1" "${@:2}" <<'PY'
+import json, sys, subprocess
+cmd, *rest = sys.argv[1:]
+params = {"verb": "breakpoint", "target": "mail.google.com", "mode": "background"}
+
+def call(p):
+    payload = json.dumps({"op": "browser_session", "params": p})
+    r = subprocess.run(["agentos", "call", "services", payload], capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    sys.exit(r.returncode)
+
+if cmd == "expr":
+    params["expr"] = rest[0]
+    if len(rest) > 1 and rest[1]:
+        params["condition"] = rest[1]
+    call(params)
+elif cmd == "url":
+    params["urlRegex"] = rest[0]
+    params["line"] = int(rest[1])
+    if len(rest) > 2 and rest[2].isdigit():
+        params["col"] = int(rest[2])
+        if len(rest) > 3:
+            params["condition"] = rest[3]
+    elif len(rest) > 2:
+        params["condition"] = rest[2]
+    call(params)
+elif cmd == "wait":
+    params["waitPause"] = True
+    params["timeout"] = 90
+    if rest[0] == "url":
+        params["urlRegex"] = rest[1]
+        params["line"] = int(rest[2])
+        i = 3
+    elif rest[0] == "expr":
+        params["expr"] = rest[1]
+        i = 2
+    else:
+        raise SystemExit("gbreak wait url|expr ...")
+    while i < len(rest):
+        if rest[i] == "--trigger" and i + 1 < len(rest):
+            params["triggerJs"] = rest[i + 1]
+            i += 2
+        elif rest[i] == "--col" and i + 1 < len(rest):
+            params["col"] = int(rest[i + 1])
+            i += 2
+        else:
+            raise SystemExit(f"unknown arg {rest[i]}")
+    call(params)
+elif cmd == "remove":
+    params["remove"] = rest[0]
+    call(params)
+elif cmd == "src":
+    arg = rest[0]
+    params = {
+        "verb": "script_source",
+        "target": "mail.google.com",
+        "mode": "background",
+        "cap": 50000,
+    }
+    if arg.isdigit():
+        params["scriptId"] = arg
+    else:
+        params["url"] = arg
+    call(params)
+else:
+    raise SystemExit("usage: gbreak expr|url|wait|remove|src ...")
+PY

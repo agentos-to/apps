@@ -1,0 +1,12 @@
+#!/bin/bash
+# gcall: browser.call — args after fn as JSON list, e.g. gcall '_m.EQn' '[{"expr":"window.__ctrl"},"r"]'
+set -euo pipefail
+FN="${1:?usage: gcall <fn-expr> [args-json] [recv-expr]}"
+ARGS="${2:-[]}"
+RECV_FLAG=""
+if [ -n "${3:-}" ]; then
+FULL=$(python3 -c "import json,sys; print(json.dumps({'op':'browser_session','params':{'verb':'call','target':'mail.google.com','mode':'background','fn':sys.argv[1],'args':json.loads(sys.argv[2]),'recv':sys.argv[3]}}))" "$FN" "$ARGS" "$3")
+else
+FULL=$(python3 -c "import json,sys; print(json.dumps({'op':'browser_session','params':{'verb':'call','target':'mail.google.com','mode':'background','fn':sys.argv[1],'args':json.loads(sys.argv[2])}}))" "$FN" "$ARGS")
+fi
+agentos call services "$FULL"

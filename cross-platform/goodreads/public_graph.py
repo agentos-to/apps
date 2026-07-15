@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from agentos import clean_html, client, connection, iso_from_ms, molt, parse_int, provides, returns, test, timeout, web_read
+from agentos import clean_html, client, connection, iso_from_ms, molt, parse_int, provides, returns, test, timeout
 
 
 USER_AGENT = "Mozilla/5.0 (compatible; AgentOS/1.0)"
@@ -959,14 +959,14 @@ async def get_profile(*, user_id: str = "", limit: int = 10, **params) -> dict[s
 
 @test(params={'book_id': '4934'})
 @returns("book")
-@provides(web_read, urls=["goodreads.com/book/show/*", "www.goodreads.com/book/show/*"])
+@provides("web_fetch", urls=["goodreads.com/book/show/*", "www.goodreads.com/book/show/*"])
 @connection("graphql")
 async def get_book(*, book_id: str = "", url: str = "", **params) -> dict[str, Any]:
     """Get structured public book details from Goodreads hydration and Apollo state
 
         Args:
             book_id: Book ID — optional if url is a goodreads.com/book/show/… link
-            url: Goodreads book page URL (web_read)
+            url: Goodreads book page URL (web_fetch)
         """
     if url:
         m = re.search(r"/book/show/(\d+)", url)
@@ -1030,7 +1030,7 @@ async def search_books(*, query: str = "", limit: int = 10, **params) -> Any:
 
 @test(params={'author_id': '3137322', 'limit': 3})
 @returns("person")
-@provides(web_read, urls=["goodreads.com/author/show/*", "www.goodreads.com/author/show/*"])
+@provides("web_fetch", urls=["goodreads.com/author/show/*", "www.goodreads.com/author/show/*"])
 @connection("graphql")
 async def get_author(*, author_id: str = "", url: str = "", limit: int = 10, **params) -> dict[str, Any]:
     """Get a public Goodreads author profile and import bounded authored books
@@ -1040,7 +1040,7 @@ async def get_author(*, author_id: str = "", url: str = "", limit: int = 10, **p
 
         Args:
             author_id: Author ID — optional if url is a goodreads.com/author/show/… link
-            url: Goodreads author page URL (web_read)
+            url: Goodreads author page URL (web_fetch)
             limit: Max authored books to import
         """
     if url:

@@ -32,7 +32,7 @@ BRAVE_BASE = os.path.expanduser("~/Library/Application Support/BraveSoftware/Bra
 
 
 def _map_webpage(row):
-    """Map a SQL row to the webpage shape."""
+    """Map a SQL row to a document (a visited-page archive entry)."""
     return {
         "id": row["url"],
         "name": row.get("title") or row["url"],
@@ -43,7 +43,7 @@ def _map_webpage(row):
 
 
 @test(params={"limit": 3})
-@returns("webpage[]")
+@returns("document[]")
 @connection("history")
 async def list_webpages(*, limit=200, **kw):
     """List recently visited pages from Brave browsing history."""
@@ -59,7 +59,7 @@ async def list_webpages(*, limit=200, **kw):
     return [_map_webpage(r) for r in rows]
 
 
-@returns("webpage[]")
+@returns("document[]")
 @connection("history")
 async def search_webpages(*, query, limit=200, **kw):
     """Search Brave browsing history by URL or title."""

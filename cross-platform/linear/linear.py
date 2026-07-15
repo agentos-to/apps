@@ -4,7 +4,7 @@
 """
 
 import re
-from agentos import claims, connection, provides, returns, test, web_read, client
+from agentos import claims, connection, provides, returns, test, client
 
 
 connection(
@@ -179,7 +179,7 @@ async def list_tasks(*, limit: int = 50, team_id: str = None, state_id: str = No
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("task")
-@provides(web_read, urls=["linear.app/*/issue/*"])
+@provides("web_fetch", urls=["linear.app/*/issue/*"])
 async def get_task(*, id: str = None, url: str = None, **params) -> dict:
     """Get a single issue by ID or URL.
 

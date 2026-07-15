@@ -46,10 +46,12 @@ vaulted. Requests originate from the real browser, so the live session and
 every anti-bot cookie ride by construction — which is exactly what defeats
 the bot-manager a cookie-replay transport has to fight.
 
-> **Before extending this app**, read:
-> 1. [Reverse Engineering overview](../../../platform/docs/src/content/docs/apps/reverse-engineering/overview.md)
-> 2. [requirements.md](./requirements.md) — captured API shapes, endpoint inventory, auth details
-> 3. The `reservation`, `flight`, `airline`, `airport`, and `pass` shape YAMLs under `docs/shapes/`
+> **Before extending this app** (dev only), read:
+> 1. [Browser-Driven Connectors](browser-driven on the system volume) — the pattern
+> 2. [dev/requirements.md](./dev/requirements.md) — captured API shapes, endpoint inventory, auth details
+> 3. The `reservation`, `flight`, `airline`, `airport`, and `pass` shape YAMLs
+>
+> **Layout** — runtime = `readme.md` + `united.py`; RE = `dev/` (never injected). `.captures/` is local RE scratch (gitignored).
 
 ## Graph model
 
@@ -94,7 +96,7 @@ Relationships:
 | `prepare_booking` | Assemble a signed `booking_offer` with ASCII review + resolved billing address + consent flags (save-card, insurance decline) | ✅ |
 | `confirm_booking` | **Read-only until /api/ShoppingCart/checkout body is captured.** Gates: HMAC blob, confirm-amount string match, live re-read, card-on-file, explicit consents | ⚠️ awaiting POST body capture |
 
-See [requirements.md](./requirements.md) for the ongoing reverse-engineering
+See [dev/requirements.md](./dev/requirements.md) for the ongoing reverse-engineering
 log and the current state of the round-trip cart + checkout body capture
 open items.
 
@@ -164,7 +166,7 @@ and probably longer. When resuming a booking flow:
    existing round-trip cart via the Brave SPA; don't re-invent it
    with `search_flights(cart_id=..., trip_index=2)` — that returns
    0 offers on a zombie cart. See
-   [requirements.md "Cart lifecycle"](./requirements.md#cart-lifecycle--observed-behavior-session-4-2026-04-24)
+   [dev/requirements.md "Cart lifecycle"](./dev/requirements.md#cart-lifecycle--observed-behavior-session-4-2026-04-24)
    for the full observed behavior.
 5. **Cart id changes on fare commit.** When resuming an old cart
    and clicking Select on a fare variant, United mints a **new**
@@ -178,7 +180,7 @@ and probably longer. When resuming a booking flow:
   opens an inline drill-down with a checkbox *"Basic Economy works
   for me"*. The `Select` button is disabled until the checkbox is
   ticked. Tick, then click Select. See
-  [requirements.md "Fare selection mechanics"](./requirements.md#fare-selection-mechanics-session-4-2026-04-24).
+  [dev/requirements.md "Fare selection mechanics"](./dev/requirements.md#fare-selection-mechanics-session-4-2026-04-24).
 - **Basic Economy gate fires on the outbound only.** For a round
   trip where outbound is Basic, the return-slice Basic Economy
   drill-down has **no checkbox** and Select is immediately
@@ -259,11 +261,11 @@ bearer is minted in-tab via `/api/auth/anonymous-token` (user-scoped
 because the cookies are present by construction) and threaded on each
 authed request exactly as United's frontend does. SSE endpoints
 (`FetchSSENestedFlights`) come back as a non-JSON string body the op
-parses. Endpoint inventory lives in [requirements.md](./requirements.md).
+parses. Endpoint inventory lives in [dev/requirements.md](./dev/requirements.md).
 
 ## Reverse engineering notes
 
-See [requirements.md](./requirements.md) for captured endpoints and auth
+See [dev/requirements.md](./dev/requirements.md) for captured endpoints and auth
 details. Because requests now originate from the real browser tab, the
 anti-bot / fingerprint apparatus the cookie-replay transport fought
 (custom UA, Sec-* spoofing, http2 flags, hand-assembled cookie headers)

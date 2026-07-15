@@ -320,7 +320,7 @@ async def list_contacts(*, limit=100, page_token=None, **params):
     headers = _auth_header(params)
     query = {
         "personFields": PERSON_FIELDS,
-        "pageSize": str(min(limit, 1000)),
+        "pageSize": str(min(int(limit), 1000)),
         "sortOrder": "LAST_MODIFIED_DESCENDING",
     }
     if page_token:
@@ -360,7 +360,7 @@ async def search_contacts(*, query, limit=30, **params):
     query_params = {
         "query": query,
         "readMask": PERSON_FIELDS,
-        "pageSize": str(min(limit, 30)),
+        "pageSize": str(min(int(limit), 30)),
     }
 
     resp = await client.get(

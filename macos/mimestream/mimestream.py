@@ -7,12 +7,16 @@ All public functions use keyword-only args and accept **params for
 forward-compatibility with engine-injected context.
 """
 
-from agentos import connection, oauth, oauth_auth, provides, returns, sql, test
+from agentos import connection, oauth, provides, returns, sql, test
 from agentos.macos import keychain, plist
 
 
+# issuer: Mimestream is a Gmail client — its accounts are google accounts,
+# so records read here arrive on `googleapis.com` identities (the engine
+# stamps `email —arrived_via→ account` against that namespace).
 connection(
     'db',
+    issuer='googleapis.com',
     sqlite='~/Library/Containers/com.mimestream.Mimestream/Data/Library/Application Support/Mimestream/Mimestream.sqlite')
 
 
@@ -35,10 +39,8 @@ def _map_email(row):
         "published": row.get("date_received"),
         "isUnread": bool(row.get("is_unread")),
         "isStarred": bool(row.get("is_flagged")),
-        "isDraft": bool(row.get("is_draft")),
-        "isSent": bool(row.get("is_sent")),
-        "isTrash": bool(row.get("is_trash")),
-        "isSpam": bool(row.get("is_spam")),
+        # Folder membership (inbox/trash/spam/sent/drafts) is the read scope —
+        # recorded as `mailbox` mirror-list membership, never as a stale flag.
         "hasAttachments": bool(row.get("has_attachments")),
         "conversationId": str(row["thread_id"]) if row.get("thread_id") else None,
         "accountEmail": row.get("account_email"),
@@ -98,6 +100,7 @@ def _map_conversation(row):
 
 @test(params={'limit': 5})
 @returns("email[]")
+@provides("mailbox", account_param="account")
 async def list_emails(*, account=None, mailbox=None, is_unread=None, limit=1000, **params):
     """List emails, optionally filtered by mailbox, account, or flags."""
     rows = await sql.query("""
@@ -113,9 +116,10 @@ async def list_emails(*, account=None, mailbox=None, is_unread=None, limit=1000,
           m.ZISSENT as is_sent,
           m.ZISTRASHED as is_trash,
           m.ZISSPAM as is_spam,
+          m.ZISININBOX as is_in_inbox,
           m.ZHASATTACHMENT as has_attachments,
           t.Z_PK as thread_id,
-          a.ZNAME as account_email,
+          i.ZADDRESS as account_email,
           CASE
             WHEN instr(m.ZFROMHEADER, '<') > 0
             THEN trim(substr(m.ZFROMHEADER, 1, instr(m.ZFROMHEADER, '<') - 1), ' "')
@@ -128,10 +132,11 @@ async def list_emails(*, account=None, mailbox=None, is_unread=None, limit=1000,
           END as from_email
         FROM ZMESSAGE m
         LEFT JOIN ZACCOUNT a ON m.ZACCOUNT = a.Z_PK
+        LEFT JOIN ZIDENTITY i ON i.ZACCOUNT = a.Z_PK AND i.ZPRIMARY = 1
         LEFT JOIN ZMESSAGETHREAD t ON m.ZTHREAD = t.Z_PK
-        WHERE m.ZISTRASHED = 0
-          AND m.ZISSPAM = 0
-          AND (:account IS NULL OR a.ZNAME = :account)
+        WHERE (m.ZISTRASHED = 0 OR :mailbox = 'trash')
+          AND (m.ZISSPAM = 0 OR :mailbox = 'spam')
+          AND (:account IS NULL OR i.ZADDRESS = :account)
           AND (:is_unread IS NULL OR m.ZISUNREAD = :is_unread)
           AND (:mailbox IS NULL OR (
             (:mailbox = 'inbox' AND m.ZISININBOX = 1) OR
@@ -139,7 +144,8 @@ async def list_emails(*, account=None, mailbox=None, is_unread=None, limit=1000,
             (:mailbox = 'drafts' AND m.ZISDRAFT = 1) OR
             (:mailbox = 'trash' AND m.ZISTRASHED = 1) OR
             (:mailbox = 'spam' AND m.ZISSPAM = 1) OR
-            (:mailbox = 'flagged' AND m.ZISFLAGGED = 1)
+            (:mailbox = 'flagged' AND m.ZISFLAGGED = 1) OR
+            (:mailbox = 'archive' AND m.ZISININBOX = 0 AND m.ZISSENT = 0 AND m.ZISDRAFT = 0)
           ))
         ORDER BY m.ZDATERECEIVED DESC
         LIMIT :limit
@@ -169,10 +175,11 @@ async def get_email(*, id, **params):
           m.ZISSENT as is_sent,
           m.ZISTRASHED as is_trash,
           m.ZISSPAM as is_spam,
+          m.ZISININBOX as is_in_inbox,
           m.ZHASATTACHMENT as has_attachments,
           m.ZSIZEESTIMATE as size_estimate,
           t.Z_PK as thread_id,
-          a.ZNAME as account_email,
+          i.ZADDRESS as account_email,
           CASE
             WHEN instr(m.ZFROMHEADER, '<') > 0
             THEN trim(substr(m.ZFROMHEADER, 1, instr(m.ZFROMHEADER, '<') - 1), ' "')
@@ -192,6 +199,7 @@ async def get_email(*, id, **params):
           c.ZINREPLYTO as in_reply_to
         FROM ZMESSAGE m
         LEFT JOIN ZACCOUNT a ON m.ZACCOUNT = a.Z_PK
+        LEFT JOIN ZIDENTITY i ON i.ZACCOUNT = a.Z_PK AND i.ZPRIMARY = 1
         LEFT JOIN ZMESSAGETHREAD t ON m.ZTHREAD = t.Z_PK
         LEFT JOIN ZMESSAGECONTENT c ON m.ZCONTENT = c.Z_PK
         WHERE m.Z_PK = :id
@@ -213,7 +221,7 @@ async def search_emails(*, query, account=None, limit=1000, **params):
           m.ZISFLAGGED as is_flagged,
           m.ZHASATTACHMENT as has_attachments,
           t.Z_PK as thread_id,
-          a.ZNAME as account_email,
+          i.ZADDRESS as account_email,
           CASE
             WHEN instr(m.ZFROMHEADER, '<') > 0
             THEN trim(substr(m.ZFROMHEADER, 1, instr(m.ZFROMHEADER, '<') - 1), ' "')
@@ -226,11 +234,12 @@ async def search_emails(*, query, account=None, limit=1000, **params):
           END as from_email
         FROM ZMESSAGE m
         LEFT JOIN ZACCOUNT a ON m.ZACCOUNT = a.Z_PK
+        LEFT JOIN ZIDENTITY i ON i.ZACCOUNT = a.Z_PK AND i.ZPRIMARY = 1
         LEFT JOIN ZMESSAGETHREAD t ON m.ZTHREAD = t.Z_PK
         LEFT JOIN ZMESSAGECONTENT c ON m.ZCONTENT = c.Z_PK
         WHERE m.ZISTRASHED = 0
           AND m.ZISSPAM = 0
-          AND (:account IS NULL OR a.ZNAME = :account)
+          AND (:account IS NULL OR i.ZADDRESS = :account)
           AND (
             m.ZSUBJECT LIKE '%' || :query || '%'
             OR m.ZSNIPPET LIKE '%' || :query || '%'
@@ -260,7 +269,7 @@ async def list_conversations(*, account=None, limit=1000, **params):
     rows = await sql.query("""
         SELECT
           t.Z_PK as id,
-          a.ZNAME as account_email,
+          i.ZADDRESS as account_email,
           (SELECT ZSUBJECT FROM ZMESSAGE WHERE ZTHREAD = t.Z_PK ORDER BY ZDATERECEIVED DESC LIMIT 1) as subject,
           (SELECT ZSNIPPET FROM ZMESSAGE WHERE ZTHREAD = t.Z_PK ORDER BY ZDATERECEIVED DESC LIMIT 1) as snippet,
           (SELECT datetime(ZDATERECEIVED + 978307200, 'unixepoch') FROM ZMESSAGE WHERE ZTHREAD = t.Z_PK ORDER BY ZDATERECEIVED DESC LIMIT 1) as date_updated,
@@ -269,7 +278,8 @@ async def list_conversations(*, account=None, limit=1000, **params):
           t.ZHASATTACHMENT as has_attachments
         FROM ZMESSAGETHREAD t
         LEFT JOIN ZACCOUNT a ON t.ZACCOUNT = a.Z_PK
-        WHERE (:account IS NULL OR a.ZNAME = :account)
+        LEFT JOIN ZIDENTITY i ON i.ZACCOUNT = a.Z_PK AND i.ZPRIMARY = 1
+        WHERE (:account IS NULL OR i.ZADDRESS = :account)
         ORDER BY date_updated DESC
         LIMIT :limit
     """, db=DB_PATH, params={
@@ -286,7 +296,7 @@ async def get_conversation(*, id, **params):
     rows = await sql.query("""
         SELECT
           t.Z_PK as id,
-          a.ZNAME as account_email,
+          i.ZADDRESS as account_email,
           (SELECT ZSUBJECT FROM ZMESSAGE WHERE ZTHREAD = t.Z_PK ORDER BY ZDATERECEIVED ASC LIMIT 1) as subject,
           (SELECT ZSNIPPET FROM ZMESSAGE WHERE ZTHREAD = t.Z_PK ORDER BY ZDATERECEIVED DESC LIMIT 1) as snippet,
           (SELECT datetime(ZDATERECEIVED + 978307200, 'unixepoch') FROM ZMESSAGE WHERE ZTHREAD = t.Z_PK ORDER BY ZDATERECEIVED DESC LIMIT 1) as date_updated,
@@ -295,6 +305,7 @@ async def get_conversation(*, id, **params):
           t.ZHASATTACHMENT as has_attachments
         FROM ZMESSAGETHREAD t
         LEFT JOIN ZACCOUNT a ON t.ZACCOUNT = a.Z_PK
+        LEFT JOIN ZIDENTITY i ON i.ZACCOUNT = a.Z_PK AND i.ZPRIMARY = 1
         WHERE t.Z_PK = :id
     """, db=DB_PATH, params={"id": id})
     return _map_conversation(rows[0]) if rows else None
@@ -318,11 +329,12 @@ async def list_mailboxes(*, account=None, **params):
           m.ZTOTALMESSAGECOUNT as total_count,
           m.ZTAGBACKGROUNDCOLOR as color,
           a.Z_PK as account_id,
-          a.ZNAME as account_email
+          i.ZADDRESS as account_email
         FROM ZMAILBOX m
         LEFT JOIN ZACCOUNT a ON m.ZACCOUNT = a.Z_PK
+        LEFT JOIN ZIDENTITY i ON i.ZACCOUNT = a.Z_PK AND i.ZPRIMARY = 1
         WHERE m.ZROLE IS NOT NULL
-          AND (:account IS NULL OR a.ZNAME = :account)
+          AND (:account IS NULL OR i.ZADDRESS = :account)
         ORDER BY
           a.ZDISPLAYORDER,
           CASE m.ZROLE
@@ -361,7 +373,7 @@ async def list_accounts(**params):
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns({"access_token": "string", "refresh_token": "string", "client_id": "string", "token_url": "string", "expires_in": "integer", "scope": "string"})
-@provides(oauth_auth, service="google", account_param="account")
+@provides("oauth_auth", service="google", account_param="account")
 async def credential_get(*, account, **params):
     """Get a live Google OAuth access token from Mimestream's keychain.
 

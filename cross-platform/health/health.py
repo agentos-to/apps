@@ -1,8 +1,8 @@
 """Health Records — parse on-disk lab reports into the health graph.
 
 `import_lab_report` reads a dated blood-panel file, detects its format,
-and returns health-observation rows wired to their panel, biomarker,
-and source document. The engine ingests and dedups on deterministic
+and returns measure rows wired to their panel, biomarker, and source
+document. The engine ingests and dedups on deterministic
 ids — re-importing a draw reconciles in place.
 
 Structure-parsing only; no clinical judgment lives here (that is the
@@ -46,9 +46,11 @@ def _number(raw) -> float | None:
 def _parse_range(raw: str) -> dict:
     """Parse a printed reference range into refLow / refHigh / refText.
 
-    Handles "100 - 199", "> 60", "< 5", "4.8 - 5.2" and free text.
-    refText always keeps the verbatim string (the snapshot the report
-    printed); numeric bounds are extracted when unambiguous.
+    Handles "100 - 199", "> 60", ">= 40", "< 5", "<= 39", "4.8 - 5.2"
+    and free text. Both the ASCII two-char operators (">=", "<=") and the
+    single glyphs ("≥", "≤") count as bounds. refText always keeps the
+    verbatim string (the snapshot the report printed); numeric bounds are
+    extracted when unambiguous.
     """
     raw = (raw or "").strip()
     if not raw:
@@ -57,9 +59,9 @@ def _parse_range(raw: str) -> dict:
     m = re.match(r"^([\d.]+)\s*[-–]\s*([\d.]+)$", raw)
     if m:
         out["refLow"], out["refHigh"] = float(m[1]), float(m[2])
-    elif re.match(r"^[>≥]\s*[\d.]+$", raw):
+    elif re.match(r"^[>≥]=?\s*[\d.]+$", raw):
         out["refLow"] = float(re.search(r"[\d.]+", raw)[0])
-    elif re.match(r"^[<≤]\s*[\d.]+$", raw):
+    elif re.match(r"^[<≤]=?\s*[\d.]+$", raw):
         out["refHigh"] = float(re.search(r"[\d.]+", raw)[0])
     return out
 
@@ -67,7 +69,7 @@ def _parse_range(raw: str) -> dict:
 # --- format parsers -------------------------------------------------------
 # Each returns a list of raw rows: {analyte, value|valueText, unit?,
 # category?, refLow?, refHigh?, refText?}. Format-agnostic shaping into
-# health-observation nodes happens in import_lab_report.
+# measure nodes happens in import_lab_report.
 
 def _parse_superpower_csv(text: str) -> list[dict]:
     """Superpower panel export — columns Name,Category,Value,Unit,Range."""
@@ -120,13 +122,13 @@ def _infer_lab(path: str) -> str:
 
 # --- the tool -------------------------------------------------------------
 
-@returns("health-observation[]")
+@returns("measure[]")
 async def import_lab_report(path: str, date: str = None, lab: str = None,
                             **params) -> list[dict]:
-    """Parse a dated lab-panel file into biomarker observations.
+    """Parse a dated lab-panel file into biomarker measures.
 
-    Autodetects the file format, then returns one health-observation
-    per analyte — each wired to its panel (fromPanel), its biomarker
+    Autodetects the file format, then returns one measure per analyte
+    — each wired to its panel (fromPanel), its biomarker
     definition (measures), and the source file (document). Ids are
     deterministic, so re-importing the same draw reconciles in place
     instead of duplicating.
@@ -161,9 +163,9 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
             f"No analyte rows parsed from {os.path.basename(path)}")
 
     # The source file and the panel both ride as 1-deep relations on each
-    # observation (the engine extracts nested relations one level deep —
+    # measure (the engine extracts nested relations one level deep —
     # a relation nested under the panel would not become an edge). The
-    # engine dedups both to a single node across all 72 observations.
+    # engine dedups both to a single node across all measures.
     document = {
         "id": path,
         "name": os.path.basename(path),
@@ -178,7 +180,7 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
         "panelCode": lab_slug,
     }
 
-    observations = []
+    measures = []
     for r in rows:
         a_slug = _slug(r["analyte"])
         biomarker = {
@@ -191,7 +193,7 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
         ob = {
             "id": f"obs:{lab_slug}:{draw_date}:{a_slug}",
             "name": r["analyte"],
-            "effectiveDate": draw_date,
+            "at": draw_date,
             "fromPanel": panel,
             "measures": biomarker,
             "document": document,
@@ -208,9 +210,9 @@ async def import_lab_report(path: str, date: str = None, lab: str = None,
         for k in ("valueText", "refText"):
             if r.get(k) is not None:
                 ob[k] = r[k]
-        observations.append(ob)
+        measures.append(ob)
 
-    return observations
+    return measures
 
 
 # --- LOINC resolution -----------------------------------------------------

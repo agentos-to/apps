@@ -68,7 +68,8 @@ async def _eval(body: str, *, timeout_s: int = 45):
     in scope telling it whether we're on the authenticated dashboard host or
     were bounced to the auth host (logged out).
     """
-    return await services.call(services.browser_session, params={
+    return await services.call("browser_session", verb="eval", params={
+        "mode": "background",  # headless bg profile (rule 19) — never the daily browser
         "target": _APP,
         "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
         "timeout": timeout_s,

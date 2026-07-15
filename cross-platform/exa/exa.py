@@ -26,8 +26,24 @@ authenticates).
 """
 
 import json
+import asyncio
+import re as _re
+import time as _time
 
-from agentos import account, app_error, claims, client, connection, credentials, normalize_email, provides, returns, services, test, timeout, web_read, web_search
+from agentos import (
+    account,
+    app_error,
+    browser_session,
+    claims,
+    client,
+    connection,
+    normalize_email,
+    provides,
+    returns,
+    services,
+    test,
+    timeout,
+)
 
 
 connection(
@@ -45,6 +61,32 @@ API_BASE = "https://api.exa.ai"
 # https://<target>/ in the engine-owned browser when no tab matches.
 _DASHBOARD = "dashboard.exa.ai"
 _AUTH = "auth.exa.ai"
+# Origins to copy login-profile → bg after headed sign-in (NextAuth cookie
+# is on `.exa.ai`; storage can be host-scoped on auth/dashboard).
+_MERGE_URLS = [
+    "https://dashboard.exa.ai/",
+    "https://auth.exa.ai/",
+    "https://exa.ai/",
+]
+
+# First-class login declaration — email OTP only (Exa has no password path).
+LOGIN = browser_session.LoginFlow(
+    domain=".exa.ai",
+    # Must go through dashboard /login so auth gets a callbackUrl — bare
+    # auth.exa.ai shows "accessed incorrectly". Engine login mode reuses the
+    # single --app window across the dashboard→auth redirect (no /json/new).
+    login_url="https://dashboard.exa.ai/login",
+    label="Exa",
+    credentials=["email"],
+    otp=browser_session.OtpSpec(
+        channels=["email"],
+        default_order=["email"],
+        remember_as="lastAuthMethod",
+        verify_tool="verify_login_code",
+    ),
+    window_on=["captcha", "unknown_challenge"],
+    plugin_key="exa",
+)
 
 
 # Readiness wait, prepended to every op body. A freshly opened tab is
@@ -66,16 +108,14 @@ const __onDashboard = location.hostname.indexOf('dashboard.') === 0;
 """
 
 
-async def _eval(target: str, body: str, *, timeout_s: int = 45):
+async def _eval(target: str, body: str, *, timeout_s: int = 45, mode: str = "background"):
     """Run an op body inside the target's tab in the engine-owned browser.
 
-    The engine matchmakes the `browser_session` provider, opens the tab
-    (and launches the browser) when needed, and returns the JS value.
-    The body runs only once the tab has settled on an `.exa.ai` origin,
-    with `__onDashboard` in scope telling it whether NextAuth kept us on
-    the dashboard (authenticated) or bounced us to auth (logged out).
+    Default ``mode=background`` (headless). Use ``mode=login`` while a
+    ``login_window(strategy=profile)`` is open.
     """
-    return await services.call(services.browser_session, params={
+    return await services.call("browser_session", verb="eval", params={
+        "mode": mode,
         "target": target,
         "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
         "timeout": timeout_s,
@@ -94,12 +134,209 @@ return (data && data.user) ? data : null;
 """
 
 
-async def _check_session() -> dict | None:
+async def _check_session(*, mode: str = "background") -> dict | None:
     """Live NextAuth session from the dashboard tab, or None."""
-    value = await _eval(_DASHBOARD, _SESSION_JS)
+    value = await _eval(_DASHBOARD, _SESSION_JS, mode=mode)
     if not isinstance(value, dict) or not value.get("user"):
         return None
     return value
+
+
+async def _login_profile_open() -> bool:
+    """True when the headed login profile is running (strategy=profile).
+
+    Probe ``auth.exa.ai`` — never ``dashboard``: on mode=login the engine
+    reuses the single ``--app`` window, and a dashboard target would
+    navigate away from the OTP form.
+    """
+    try:
+        await services.call(
+            "browser_session",
+            verb="cookies",
+            params={
+                "mode": "login",
+                "target": _AUTH,
+                "urls": [f"https://{_AUTH}/", f"https://{_DASHBOARD}/"],
+            },
+        )
+        return True
+    except Exception:
+        return False
+
+
+# Exa OTP mail — subject is stable; code is 6 alnum in HTML + otp= query.
+# Inbox is discovered via mailbox providers (never hardcode an app / address).
+_OTP_SUBJECT = "Sign in to Exa Dashboard"
+_OTP_CODE_RE = _re.compile(
+    r"(?:otp=|/Exa is:?\s*)([A-Za-z0-9]{4,8})\b|>\s*([A-Z0-9]{6})\s*<",
+    _re.I,
+)
+
+
+def _extract_otp_code(blob: str) -> str | None:
+    if not blob:
+        return None
+    m = _OTP_CODE_RE.search(blob)
+    if not m:
+        return None
+    return (m.group(1) or m.group(2) or "").strip() or None
+
+
+def _rows_from_mailbox(result) -> list[dict]:
+    if isinstance(result, list):
+        return [r for r in result if isinstance(r, dict)]
+    if isinstance(result, dict):
+        for key in ("emails", "items", "results", "nodes"):
+            rows = result.get(key)
+            if isinstance(rows, list):
+                return [r for r in rows if isinstance(r, dict)]
+        if result.get("name") or result.get("content") or result.get("text"):
+            return [result]
+    return []
+
+
+async def _mailbox_poll_attempts(delivered_to: str) -> list[dict]:
+    """Brokered mailbox attempts — no hardcoded provider or inbox address.
+
+    1. ``account=<delivered_to>`` and let the engine route.
+    2. Same-domain linked identities from ``services.capabilities`` (workspace
+       aliases land here without naming joe@ / gmail).
+    3. Each ``list_providers("mailbox")`` app with no account (provider default).
+    """
+    email = normalize_email(delivered_to)
+    domain = email.split("@", 1)[-1] if "@" in email else ""
+    attempts: list[dict] = [{"account": email}]
+
+    try:
+        from agentos._bridge import dispatch
+
+        caps = await dispatch("services.capabilities", {})
+        mb = caps.get("mailbox") if isinstance(caps, dict) else None
+        for p in (mb or {}).get("providers") or []:
+            if not isinstance(p, dict):
+                continue
+            app_id = p.get("app") or p.get("app_id")
+            for acct in p.get("accounts") or []:
+                acct_n = normalize_email(str(acct))
+                if not acct_n or acct_n == email:
+                    continue
+                if domain and acct_n.endswith("@" + domain):
+                    attempts.append({"account": acct_n, "app": app_id})
+    except Exception:
+        pass
+
+    try:
+        listing = await services.list_providers("mailbox")
+        for p in (listing or {}).get("providers") or []:
+            if not isinstance(p, dict):
+                continue
+            app_id = p.get("app_id") or p.get("app")
+            if app_id:
+                attempts.append({"app": app_id})
+    except Exception:
+        pass
+
+    # Dedupe while preserving order.
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for a in attempts:
+        key = (a.get("app"), a.get("account"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
+
+
+async def _fetch_exa_otp_once(delivered_to: str, *, not_before: float) -> str | None:
+    """One mailbox poll for a fresh Exa sign-in code (brokered providers)."""
+    query = f'subject:"{_OTP_SUBJECT}" newer_than:1d'
+    delivered = normalize_email(delivered_to)
+    for attempt in await _mailbox_poll_attempts(delivered_to):
+        params: dict = {"query": query, "limit": 5}
+        if attempt.get("account"):
+            params["account"] = attempt["account"]
+        try:
+            if attempt.get("app"):
+                raw = await services.call(
+                    "mailbox", app=attempt["app"], params=params
+                )
+            else:
+                raw = await services.call("mailbox", params=params)
+        except Exception:
+            continue
+        for row in _rows_from_mailbox(raw):
+            blob = " ".join(
+                str(row.get(k) or "")
+                for k in ("name", "text", "content", "subject", "snippet")
+            )
+            subj = (row.get("name") or "").lower()
+            if _OTP_SUBJECT.lower() not in subj and delivered not in blob.lower():
+                continue
+            code = _extract_otp_code(blob)
+            if not code:
+                continue
+            published = row.get("published") or row.get("datePublished") or ""
+            if published and not_before > 0:
+                try:
+                    from datetime import datetime
+
+                    ts = datetime.fromisoformat(
+                        str(published).replace("Z", "+00:00")
+                    ).timestamp()
+                    if ts + 5 < not_before:
+                        continue
+                except Exception:
+                    pass
+            return code
+    return None
+
+
+async def _poll_exa_otp(
+    delivered_to: str, *, not_before: float, timeout_s: float = 120, interval_s: float = 5
+) -> str | None:
+    """Poll mailbox every ``interval_s`` until an Exa OTP appears or timeout."""
+    deadline = _time.time() + timeout_s
+    while _time.time() < deadline:
+        code = await _fetch_exa_otp_once(delivered_to, not_before=not_before)
+        if code:
+            return code
+        await asyncio.sleep(interval_s)
+    return None
+
+
+async def _complete_with_mailbox_otp(email: str, *, not_before: float) -> dict:
+    """Poll inbox for the Exa code, verify it, merge login→bg when needed."""
+    code = await _poll_exa_otp(email, not_before=not_before)
+    if not code:
+        return {
+            "shape": "auth_challenge",
+            "kind": "code_sent",
+            "name": "Exa sign-in code",
+            "payload": email,
+            "artifact": f"Verification code emailed to {email}.",
+            "retrieval": {
+                "via": "email",
+                "deliveredTo": email,
+                "sender": "exa.ai",
+                "subjectHint": _OTP_SUBJECT,
+                "look_for": "6-character code in the body (or otp= in the link)",
+            },
+            "instructions": (
+                f"Mailbox poll timed out for {email}. Read the Exa email "
+                f"via any mailbox provider, then call "
+                f"verify_login_code(email, code)."
+            ),
+            "continueWith": "verify_login_code",
+        }
+    return await verify_login_code(email=email, code=code)
+
+
+async def _merge_login_into_bg() -> dict:
+    """Copy Exa session from login profile → headless bg, then close login."""
+    merged = await LOGIN.merge_into_background(urls=_MERGE_URLS)
+    await browser_session.close_login_window(strategy="profile")
+    return merged if isinstance(merged, dict) else {"merged": True}
 
 
 def _needs_auth():
@@ -123,11 +360,38 @@ const __setVal = (el, v) => {
 };
 """
 
-# Drive the real sign-in form rather than POST /api/auth/signin/email:
-# Exa fronts that endpoint with Cloudflare Turnstile, which 403s a
-# programmatic call. Submitting the actual form lets Turnstile solve
-# invisibly in the real browser — the whole point of browser-as-store.
+# Drive the real sign-in form. Prefer headless; on Turnstile escalate to a
+# headed login_window but KEEP driving (fill email from credentials) so the
+# human only clears the challenge. Wait for the Turnstile *token* before
+# Continue — clicking early leaves "Please complete the verification
+# challenge" even after the widget shows Success. OTP still goes through
+# verify_login_code.
+# turnstile_wait_ms: headless ~8s (fail fast → escalate); login profile
+# ~3m (human solves widget; we watch the token then click).
 _LOGIN_JS = _REACT_SET + """
+const bodyText = () => (document.body && document.body.innerText) || '';
+const turnstileWidgetPresent = () =>
+  !!document.querySelector('input[name="cf-turnstile-response"]')
+  || !!document.querySelector('iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"], .cf-turnstile');
+const turnstileTokenReady = () => {
+  const el = document.querySelector('input[name="cf-turnstile-response"]');
+  const fromInput = el && typeof el.value === 'string' && el.value.length > 20;
+  let fromApi = false;
+  let expired = false;
+  try {
+    if (typeof turnstile !== 'undefined') {
+      if (typeof turnstile.isExpired === 'function') expired = !!turnstile.isExpired();
+      if (typeof turnstile.getResponse === 'function') {
+        const r = turnstile.getResponse();
+        fromApi = typeof r === 'string' && r.length > 20;
+      }
+    }
+  } catch (_) {}
+  if (expired) return false;
+  return !!(fromInput || fromApi);
+};
+const challengeMsg = () =>
+  /please complete the verification challenge/i.test(bodyText());
 let emailInp = null;
 const d1 = Date.now() + 15000;
 while (Date.now() < d1) {
@@ -135,20 +399,56 @@ while (Date.now() < d1) {
   if (emailInp) break;
   await new Promise(r => setTimeout(r, 300));
 }
-if (!emailInp) return { __error: 'sign-in form never appeared' };
+if (!emailInp) {
+  if (turnstileWidgetPresent() || challengeMsg())
+    return { __error: 'verification challenge (Turnstile) blocking headless submit' };
+  return { __error: 'sign-in form never appeared' };
+}
 __setVal(emailInp, %(email)s);
 await new Promise(r => setTimeout(r, 400));
 const cont = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Continue');
 if (!cont) return { __error: 'no Continue button on the sign-in form' };
 for (let i = 0; i < 20 && cont.disabled; i++) await new Promise(r => setTimeout(r, 500));
-cont.click();
-const d2 = Date.now() + 25000;
-while (Date.now() < d2) {
-  if (document.querySelector('input[placeholder="Enter verification code"]')) return { sent: true };
-  if (/verification code has been sent/i.test(document.body.innerText)) return { sent: true };
+
+// Wait for Turnstile token (or no widget) before Continue — do NOT treat the
+// red challenge banner alone as "blocked"; that appears after a premature click.
+const waitMs = %(turnstile_wait_ms)s;
+const readyDeadline = Date.now() + waitMs;
+while (Date.now() < readyDeadline) {
+  if (turnstileTokenReady()) break;
+  if (!turnstileWidgetPresent() && !challengeMsg()) break;
   await new Promise(r => setTimeout(r, 400));
 }
-return { __error: 'code entry never appeared (Turnstile may have blocked the submit)' };
+if ((turnstileWidgetPresent() || challengeMsg()) && !turnstileTokenReady()) {
+  return {
+    __error: 'verification challenge (Turnstile) blocking headless submit',
+    emailFilled: true,
+    turnstileWaitMs: waitMs,
+  };
+}
+
+cont.click();
+const d2 = Date.now() + 20000;
+while (Date.now() < d2) {
+  if (document.querySelector('input[placeholder="Enter verification code"]')) return { sent: true };
+  if (/verification code has been sent/i.test(bodyText())) return { sent: true };
+  // Token consumed / expired after a bad click — wait for a fresh Success again.
+  if (challengeMsg() && !turnstileTokenReady()) {
+    const reDeadline = Date.now() + Math.min(waitMs, 120000);
+    while (Date.now() < reDeadline) {
+      if (turnstileTokenReady()) {
+        cont.click();
+        break;
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+  }
+  await new Promise(r => setTimeout(r, 400));
+}
+return {
+  __error: 'code entry never appeared (Turnstile may have blocked the submit)',
+  emailFilled: true,
+};
 """
 
 # Enter the code in the real form and wait for the redirect to the
@@ -226,7 +526,7 @@ async def check_session(**params) -> dict:
 @account.login
 @returns("account | auth_challenge")
 @connection("none")
-@timeout(90)
+@timeout(300)
 async def login(*, email: str = "", **params) -> dict:
     """Sign in to the Exa dashboard — or report the already-live session.
 
@@ -244,7 +544,16 @@ async def login(*, email: str = "", **params) -> dict:
         return _account_from_session(session)
 
     if not email:
-        creds = await credentials.retrieve(domain=".exa.ai", required=["email"])
+        creds = await LOGIN.retrieve_credentials()
+        if creds.get("unlock_required"):
+            return creds
+        if creds.get("code") == "MultipleMatches":
+            return app_error(
+                creds.get("error") or "Multiple login items match exa.ai.",
+                code="MultipleMatches",
+                candidates=creds.get("candidates"),
+                hint="Pass `email` explicitly, or set account= on retrieve.",
+            )
         if creds.get("found"):
             email = (creds.get("value") or {}).get("email") or creds.get("identifier") or ""
     if not email:
@@ -258,66 +567,100 @@ async def login(*, email: str = "", **params) -> dict:
 
     # Drive the real sign-in form (not a fetch to /api/auth/signin/email —
     # that's Turnstile-fronted and 403s a programmatic call). Submitting
-    # the form lets Turnstile clear invisibly in the real browser.
-    value = await _eval(_DASHBOARD, _LOGIN_JS % {"email": json.dumps(email)},
-                        timeout_s=70)
+    # the form lets Turnstile clear invisibly in the real browser — when
+    # headless still hits a challenge wall, escalate to login_window.
+    value = await _eval(
+        _DASHBOARD,
+        _LOGIN_JS
+        % {"email": json.dumps(email), "turnstile_wait_ms": 8000},
+        timeout_s=70,
+    )
     if not isinstance(value, dict) or value.get("__error"):
         detail = value.get("__error") if isinstance(value, dict) else value
+        detail_s = str(detail or "")
+        if _re.search(
+            r"turnstile|verification challenge|code entry never appeared|captcha",
+            detail_s,
+            _re.I,
+        ):
+            # Dedicated login profile (bg stays headless). Drive with mode=login.
+            challenge = await LOGIN.escalate_to_window(
+                reason=(
+                    f"Exa needs a headed window for Turnstile ({detail_s}). "
+                    f"Email {email} is being filled automatically — complete "
+                    "the verification challenge if shown."
+                ),
+                retrieval={
+                    "via": "email",
+                    "deliveredTo": email,
+                    "sender": "exa.ai",
+                    "subjectHint": "Sign in to Exa Dashboard",
+                    "look_for": "a short verification code in the body",
+                },
+                strategy="profile",
+            )
+            driven = await _eval(
+                _AUTH,
+                _LOGIN_JS
+                % {
+                    "email": json.dumps(email),
+                    # Human solves Turnstile; we watch cf-turnstile-response /
+                    # turnstile.getResponse() then click Continue.
+                    "turnstile_wait_ms": 180_000,
+                },
+                timeout_s=200,
+                mode="login",
+            )
+            if isinstance(driven, dict) and driven.get("sent"):
+                return await _complete_with_mailbox_otp(
+                    email, not_before=_time.time() - 30
+                )
+            if isinstance(challenge, dict) and challenge.get("kind") == "login_window":
+                challenge["payload"] = email
+                challenge["instructions"] = (
+                    f"Email {email} should be filled on the login-profile "
+                    "window (bg is still headless). Complete Turnstile if "
+                    "shown — login polls mailbox for the code, verifies, "
+                    "merges into bg, and closes."
+                )
+            return challenge
         return app_error(
             f"Driving the Exa sign-in form failed: {detail}. The login page "
             "shape may have changed — re-inspect the form.",
             code="SigninFailed",
         )
 
-    return {
-        "name": "Exa sign-in code",
-        "kind": "code_sent",
-        "payload": email,
-        "artifact": f"Verification code emailed to {email}.",
-        # Self-serve hint for an agent with email access — where to look,
-        # NOT how to parse. The agent reads the message, confirms it's a
-        # genuine Exa sign-in (sender, recency, subject) and reads the
-        # code with judgment. No regex: the code may be digits, alnum
-        # (e.g. "23THE6"), or a link, and judgment also catches a
-        # phishing look-alike a pattern would blindly trust.
-        "retrieval": {
-            "via": "email",
-            "deliveredTo": email,
-            "sender": "exa.ai",
-            "subjectHint": "Sign in to Exa Dashboard",
-            "look_for": "a short verification code in the body "
-                        "('Your verification code for Exa is: …')",
-        },
-        "instructions": (
-            f"Read the verification email Exa just sent to {email} (from "
-            "exa.ai, subject 'Sign in to Exa Dashboard'). Confirm it's "
-            "genuine and recent, read the code from the body, then call "
-            "verify_login_code(email, code). Only ask the human if the "
-            "message isn't there."
-        ),
-        "continueWith": "verify_login_code",
-    }
+    # Headless path: code emailed — poll mailbox and finish.
+    return await _complete_with_mailbox_otp(email, not_before=_time.time() - 30)
 
 
 @returns("account")
 @claims("primary_user")
 @connection("none")
-@timeout(90)
+@timeout(120)
 async def verify_login_code(*, email: str, code: str, **params) -> dict:
     """Enter the verification code in the sign-in form and finish login.
 
     Types the code into the live form (the one `login` advanced to) and
-    waits for the redirect to the dashboard. The session lands in the
-    browser profile through the form's own flow — the profile IS the
-    session store; nothing is extracted or vaulted. Confirms by reading
-    the session back.
+    waits for the redirect to the dashboard. When sign-in ran on the
+    dedicated login profile (Turnstile path), merges cookies/storage into
+    the headless bg profile and closes the login window.
     """
     if not email or not code:
         return app_error("email and code are required.", code="BadParams")
     email = normalize_email(email)
 
-    value = await _eval(_DASHBOARD, _VERIFY_JS % {"code": json.dumps(code)},
-                        timeout_s=60)
+    # Prefer login profile when open (headed Turnstile path); else bg.
+    # Drive auth.exa.ai — that is where the code input lives. Never target
+    # dashboard here: mode=login would navigate the sole --app window off
+    # the OTP form.
+    mode = "login" if await _login_profile_open() else "background"
+    value = await _eval(
+        _AUTH,
+        _VERIFY_JS % {"code": json.dumps(code)},
+        timeout_s=60,
+        mode=mode,
+    )
     if not isinstance(value, dict) or value.get("__error"):
         detail = value.get("__error") if isinstance(value, dict) else value
         return app_error(
@@ -326,13 +669,38 @@ async def verify_login_code(*, email: str, code: str, **params) -> dict:
             code="VerifyFailed",
         )
 
-    session = await _check_session()
+    session = await _check_session(mode=mode)
     if not session:
         return app_error(
             "The form accepted the code but no live session followed — "
             "request a fresh code with login and retry.",
             code="VerifyFailed",
         )
+
+    if mode == "login":
+        try:
+            merge = await _merge_login_into_bg()
+        except Exception as e:
+            return app_error(
+                f"Signed in on the login profile but merge into background "
+                f"failed: {e}. Retry merge_login_session then "
+                f"close_login_window, or call check_session.",
+                code="MergeFailed",
+            )
+        # Confirm the session is live on the headless daemon profile.
+        bg = await _check_session(mode="background")
+        if not bg:
+            return app_error(
+                "Merged cookies into background but check_session on bg "
+                "failed — session may need flip fallback "
+                "(login_window strategy=flip).",
+                code="MergeFailed",
+                merge=merge,
+            )
+        account = _account_from_session(bg)
+        account["merged"] = merge
+        return account
+
     return _account_from_session(session)
 
 
@@ -540,7 +908,7 @@ def _map_result(r: dict) -> dict:
 
 @test(params={'query': 'agentOS personal AI', 'limit': 3})
 @returns("result[]")
-@provides(web_search)
+@provides("web_search")
 @connection("api")
 @timeout(30)
 async def search(*, query: str, limit: int = 10, category: str = None, include_text: bool = True, **params) -> list[dict]:
@@ -571,8 +939,8 @@ async def search(*, query: str, limit: int = 10, category: str = None, include_t
 
 
 @test(params={'url': 'https://exa.ai'})
-@returns("webpage")
-@provides(web_read)
+@returns("document")
+@provides("web_fetch")
 @connection("api")
 @timeout(30)
 async def read_webpage(*, url: str, **params) -> dict:

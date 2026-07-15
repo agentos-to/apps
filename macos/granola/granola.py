@@ -28,7 +28,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from agentos import connection, provides, returns, test, timeout, web_read, client
+from agentos import connection, provides, returns, test, timeout, client
 
 
 connection(
@@ -438,7 +438,7 @@ async def list_meetings(limit: int = 20, page: int = 0, connection: dict | None 
 
 
 @returns("meeting")
-@provides(web_read, urls=["app.granola.ai/docs/*"])
+@provides("web_fetch", urls=["app.granola.ai/docs/*"])
 @connection("api")
 @timeout(60)
 async def get_meeting(id: str = None, url: str = None, connection: dict | None = None, **_kwargs) -> dict:

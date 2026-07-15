@@ -73,25 +73,13 @@ get_cookie_key     Derive AES-128 key from Keychain (PBKDF2)
 list_cookies       List raw (encrypted) cookies for a domain
 cookie_get         Full pipeline: extract + decrypt any cookies for a domain
 
-OPERATION          DESCRIPTION
---------------     -------------------------------------------------------
-cdp_connect        CDP WebSocket URL (the cdp_access provider)
-login_window       Headed app-mode sign-in window on the AgentOS profile
 ```
 
-## The engine-owned instance (`cdp.py`)
+## Driving Brave (not this plugin's job)
 
-`cdp_connect(mode="launch")` runs a separate, engine-owned Brave on its
-own profile at `~/.agentos/browsers/brave` — headless (`--headless=new`),
-named **"AgentOS"**, never sharing fate with the user's daily Brave.
-This is the session host every browser-driven connector rides.
-
-When a login needs a human (SSO, MFA, CAPTCHA), `login_window(url,
-label?)` swaps the same profile to a headed Chromium app-mode window
-(`--app=<url>`); the human signs in, the agent polls the target app's
-`check_session`, then `login_window(close=true)` swaps back to
-headless. One profile, two modes — the session persists on disk across
-every swap; no cookie copying. Agents reach it through the
-`login_window` *service* (provided by the OS browser app), which
-resolves `cdp_access` once so the window always opens on the session
-host's exact profile.
+CDP discovery/launch is engine-native: the OS `browser` app finds or
+launches any installed Chromium-family browser itself (descriptor table
++ choreography in `core/crates/system-apps/src/chromium.rs`), and
+Settings ▸ System ▸ Default Browser picks which brand it drives. This
+plugin carries only what churns with Brave releases — the local SQLite
+readers above. The old `cdp.py` (`cdp_access` provider) is deleted.

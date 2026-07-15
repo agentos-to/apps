@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+JS="${1:?usage: gprobe '<js body>'}"
+TK=/Users/joe/dev/agentos/commons/re/toolkit.js
+PR=/Users/joe/dev/agentos/commons/plugins/cross-platform/gmail-cdp/dev/probes/gmail-probe.js
+PRE=""
+if [ "${FRESH:-}" = 1 ]; then PRE="delete globalThis.__re; delete globalThis.__gprobe;"; fi
+FULL=$(python3 -c "
+import json,sys
+tk=open(sys.argv[1]).read(); pr=open(sys.argv[2]).read(); pre=sys.argv[3]; body=sys.argv[4]
+payload='(async()=>{'+pre+tk+';'+pr+';'+body+'})()'
+print(json.dumps({'op':'browser_session','params':{'verb':'eval','target':'mail.google.com','mode':'background','js':payload}}))
+" "$TK" "$PR" "$PRE" "$JS")
+agentos call services "$FULL"

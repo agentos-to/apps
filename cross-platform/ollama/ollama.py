@@ -17,8 +17,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from agentos import connection, provides, returns, shell, test, timeout, client
-from agentos.services import llm
+from agentos import account, connection, provides, returns, shell, test, timeout, client
 
 
 connection(
@@ -182,7 +181,7 @@ def _normalize_tool_calls(raw: list) -> list:
 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
-@provides(llm)
+@provides("chat", serves=["ollama/*"])
 @returns({"content": "{'type': 'string', 'description': 'Text response (null if tool calls only)'}", "thinking": "{'type': 'string', 'description': 'Reasoning trace (only for thinking models)'}", "tool_calls": "{'type': 'array', 'description': 'Tool calls the model wants to make'}", "stop_reason": "{'type': 'string', 'enum': ['end_turn', 'tool_use', 'max_tokens']}", "usage": "{'type': 'object', 'description': 'Token counts: input_tokens, output_tokens'}"})
 @connection(["api", "cli"])
 @timeout(300)
@@ -208,6 +207,9 @@ async def chat(
             temperature: Sampling temperature (0 = deterministic, good for agents)
             thinking: Enable extended thinking / reasoning mode (qwen3, glm-4.7, etc.)
         """
+    # Canonical model ids reach this provider as `ollama/<name>` (the maker
+    # namespace it declares in `serves`); the local API wants the bare tag.
+    model = model.removeprefix("ollama/")
     conn_name = _connection_name(connection)
 
     if conn_name == "cli":
@@ -254,6 +256,9 @@ async def chat(
     done_reason = resp.get("done_reason", "stop")
 
     return {
+        # Canonical id (the `ollama/<tag>` the graph model node is keyed by) —
+        # the honest record + the pricing key (a local model prices to $0).
+        "model": f"ollama/{model}",
         "content": msg.get("content") or None,
         "thinking": msg.get("thinking") or None,
         "tool_calls": _normalize_tool_calls(raw_tools),
@@ -511,6 +516,27 @@ async def show_model(model: str, connection: dict | None = None, **kwargs) -> di
 _OLLAMA = {"shape": "product", "url": "https://ollama.com", "name": "Ollama"}
 
 
+@account.check
+@returns("account")
+@connection("api")
+@timeout(5)
+async def check_session(connection: dict | None = None, **params) -> dict:
+    """Identify the local Ollama account.
+
+    Ollama runs on this machine — there is no login and no remote identity. The
+    account is simply `local`; reporting it here attributes an inference
+    dispatch to a real (local) account rather than leaving it blank, uniform
+    with vaulted providers. The engine never hardcodes "local" — this provider
+    declares its own identity.
+    """
+    return {
+        "authenticated": True,
+        "at": _OLLAMA,
+        "identifier": "local",
+        "handle": "local",
+    }
+
+
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("model[]")
 @connection("api")
@@ -520,7 +546,9 @@ async def list_models(connection: dict | None = None, **params) -> list[dict]:
     raw = await _op_list_models(connection)
     return [
         {
-            "id": m.get("name"),
+            # Canonical id — the `ollama/<tag>` the model is addressed by and the
+            # `serves` namespace it declares, so a call's model string matches.
+            "id": f"ollama/{m.get('name')}",
             "name": m.get("name"),
             "at": _OLLAMA,
             "published": m.get("modified_at"),
@@ -530,6 +558,10 @@ async def list_models(connection: dict | None = None, **params) -> list[dict]:
             "family": (m.get("details") or {}).get("family"),
             "parameterSize": (m.get("details") or {}).get("parameter_size"),
             "quantizationLevel": (m.get("details") or {}).get("quantization_level"),
+            # A local model is free — priced $0, so its calls cost as `computed`
+            # from the graph, not `unpriced`.
+            "pricingInput": 0,
+            "pricingOutput": 0,
         }
         for m in (raw or [])
     ]
@@ -544,7 +576,9 @@ async def list_models_cli(connection: dict | None = None, **params) -> list[dict
     raw = await _list_models_via_cli(connection)
     return [
         {
-            "id": m.get("name"),
+            # Canonical id — the `ollama/<tag>` the model is addressed by and the
+            # `serves` namespace it declares, so a call's model string matches.
+            "id": f"ollama/{m.get('name')}",
             "name": m.get("name"),
             "at": _OLLAMA,
             "published": m.get("modified_at"),
@@ -554,6 +588,10 @@ async def list_models_cli(connection: dict | None = None, **params) -> list[dict
             "family": (m.get("details") or {}).get("family"),
             "parameterSize": (m.get("details") or {}).get("parameter_size"),
             "quantizationLevel": (m.get("details") or {}).get("quantization_level"),
+            # A local model is free — priced $0, so its calls cost as `computed`
+            # from the graph, not `unpriced`.
+            "pricingInput": 0,
+            "pricingOutput": 0,
         }
         for m in (raw or [])
     ]

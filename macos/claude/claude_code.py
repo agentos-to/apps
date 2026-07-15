@@ -20,9 +20,8 @@ every invocation.
 import json
 from pathlib import Path
 
-from agentos import shell, returns, timeout, connection, provides, client
+from agentos import account, shell, returns, timeout, connection, provides, client
 from agentos.macos import keychain
-from agentos.services import llm
 
 # Claude Code stores its OAuth token in the macOS keychain under this service.
 # The token has `user:inference` scope and can call /v1/models directly —
@@ -61,7 +60,7 @@ def _map_model(m: dict) -> dict:
         "name": m.get("display_name"),
         "at": _ANTHROPIC,
         "published": m.get("created_at"),
-        "modelType": "llm",
+        "modelType": "chat",
     }
 
 # MCP config pointing at agentos mcp — spawns a separate process, no recursion.
@@ -74,21 +73,45 @@ MCP_CONFIG = json.dumps({
     }
 })
 
-# Tools the agent is allowed to use. MCP tools for engine access,
-# Claude Code native tools for file/web access. Explicitly listed so
-# the agent CANNOT use Agent (sub-agent spawning) or Bash.
+# Tools the agent loop is allowed to use. `mcp__agentos` grants the WHOLE
+# agentOS MCP surface (data, apps, services, readme, windows, ui) — a
+# server-level allow, so a brokered sub-agent can drive the engine the same
+# way the human's agent does (and self-serve `services.agent`, `data.split`,
+# etc.) without this list drifting every time a namespace is added. Native
+# Claude tools stay read-only (no Bash, no Write/Edit).
 ALLOWED_MCP = [
-    "mcp__agentos__run",
-    "mcp__agentos__read",
-    "mcp__agentos__search",
+    "mcp__agentos",                    # full agentOS engine surface
 ]
 ALLOWED_NATIVE = [
     "Read", "Glob", "Grep",           # codebase access (read-only)
     "WebSearch", "WebFetch",           # web research
-    "Agent",                           # subagents for deep investigation
 ]
 ALLOWED_TOOLS = ",".join(ALLOWED_MCP + ALLOWED_NATIVE)
 
+# Tools the brokered agent must NEVER reach. `--allowedTools` only auto-approves;
+# it does not remove an unlisted tool from the model's context — only a bare name
+# in `--disallowedTools` does (the model never sees it). The native `Agent` tool
+# is the one that matters: a brokered claude -p sub-agent that can spawn its
+# *harness's* own sub-agents would delegate outside the engine — invisible to the
+# graph, off the same-page surface, and keyed to a Claude-only model roster that
+# shadows `services.agent`. The engine is the sole broker of sub-agents; the only
+# way to spawn one is `services.agent` (via the agentOS MCP surface). Removing the
+# native tool is what makes that route discoverable instead of overridden.
+DISALLOWED_NATIVE = ["Agent"]
+DISALLOWED_TOOLS = ",".join(DISALLOWED_NATIVE)
+
+
+
+def _ensure_messages(messages: list | None, prompt: str | None) -> list:
+    """Accept either a full `messages` history or a single `prompt`.
+
+    The broker may route a caller's `services.agent` request here or to the
+    engine's agent-loop; both accept `prompt` (the friendly single-turn form)
+    or `messages`, so the caller never has to know which provider it landed on.
+    """
+    if messages:
+        return messages
+    return [{"role": "user", "content": prompt or ""}]
 
 
 def _format_messages(messages: list) -> str:
@@ -139,25 +162,57 @@ async def list_models_cli(**params) -> list:
     return [_map_model(m) for m in data.get("data", [])]
 
 
-@provides(llm, features=["tool_calling", "structured_output", "structured_output_with_tools"])
-@returns({"content": "string", "tool_calls": "array", "stop_reason": "string", "usage": "object"})
+@account.check
+@returns("account")
 @connection("code")
-@timeout(1800)
-async def agent(*, model: str, messages: list, tools: list = None,
-         temperature: float = 0, system: str = None,
-         output_schema: dict = None, **params) -> dict:
-    """Run Claude as an agent via the local Claude Code CLI — uses existing auth, no API key.
+@timeout(5)
+async def check_subscription(**params) -> dict:
+    """Identify the Claude Code subscription account — a pure local read.
 
-    Unlike `chat` (single Messages API call), this runs a full agent loop:
-    Claude can call tools, read tool results, and iterate until done. The
-    returned content is the final answer after all intermediate tool use.
+    Claude Code writes the signed-in identity to `~/.claude.json` under
+    `oauthAccount`. That email IS the account the local `claude` binary bills
+    inference to, so reading it here (no API call, no keychain) attributes every
+    `services.agent` / `services.chat` dispatch on the `code` connection to the
+    real paying account. The app's own per-connection check: `web` identifies
+    the claude.ai login, `api` the key account, this one the subscription.
+    """
+    path = Path.home() / ".claude.json"
+    if not path.exists():
+        return {"authenticated": False}
+    try:
+        oa = (json.loads(path.read_text()) or {}).get("oauthAccount") or {}
+    except (OSError, json.JSONDecodeError):
+        return {"authenticated": False}
+    email = oa.get("emailAddress")
+    if not email:
+        return {"authenticated": False}
+    acct = {
+        "authenticated": True,
+        "at": _ANTHROPIC,
+        "identifier": email,
+        "handle": email,
+    }
+    if oa.get("displayName"):
+        acct["display"] = oa["displayName"]
+    return acct
 
-    Model IDs come from the graph (list_models). No hardcoded aliases.
 
-    When tools are provided, attaches agentos as an MCP server so Claude
-    handles tool calling natively (no XML-in-prompt hack). When output_schema
-    is provided, uses --json-schema for native structured validation. Both
-    can be combined — tools + structured output in the same call.
+async def _run_claude_p(*, model: str, messages: list, system: str | None,
+                        output_schema: dict | None, with_tools: bool) -> dict:
+    """Run one `claude -p` invocation and parse its JSON result.
+
+    `with_tools` is the whole difference between `chat` and `agent`:
+
+    - **agent** (`with_tools=True`) wires agentOS as an MCP server
+      (`--mcp-config`) and allows the tool sandbox (`--allowedTools`), so Claude
+      reaches the engine's tools and iterates a real loop.
+    - **chat** (`with_tools=False`) is a *pure* completion: no MCP server and an
+      empty `--allowedTools`, so Claude can use no tools at all and answers
+      directly. (`@provides("chat")` is the no-tools, no-loop return shape — a
+      `chat` that could still call WebSearch/Read would be a tool-loop wearing
+      a completion's name.)
+
+    Both use subscription auth (no API key) and support `--json-schema`.
     """
     prompt = _format_messages(messages)
 
@@ -166,19 +221,21 @@ async def agent(*, model: str, messages: list, tools: list = None,
         "--output-format", "json",
         "--model", model,
         "--dangerously-skip-permissions",
+        # Tool access: the full sandbox for the agent loop, nothing for a
+        # pure completion. An empty allowlist denies every tool.
+        "--allowedTools", ALLOWED_TOOLS if with_tools else "",
     ]
-
+    # Remove the native `Agent` tool from the loop's context entirely — the
+    # engine is the only broker of sub-agents (see DISALLOWED_TOOLS). The pure
+    # completion has no tools at all, so it needs no denylist.
+    if with_tools:
+        args.extend(["--disallowedTools", DISALLOWED_TOOLS])
     if system:
         args.extend(["--system-prompt", system])
-
-    # Restrict tools — read-only codebase access + subagents + web + agentOS MCP
-    args.extend(["--allowedTools", ALLOWED_TOOLS])
-
-    # Native MCP tool calling — point at agentos mcp for tool dispatch
-    if tools:
+    # Native MCP tool calling — point at agentos mcp for tool dispatch. Only the
+    # agent loop gets it; without it, claude -p has no engine tools.
+    if with_tools:
         args.extend(["--mcp-config", MCP_CONFIG])
-
-    # Native structured output via --json-schema
     if output_schema:
         args.extend(["--json-schema", json.dumps(output_schema)])
 
@@ -191,7 +248,6 @@ async def agent(*, model: str, messages: list, tools: list = None,
         stderr = result.get("stderr", "")
         raise RuntimeError(f"claude -p failed (exit {exit_code}): {stderr or stdout}")
 
-    # Parse JSON output from claude -p
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError:
@@ -205,12 +261,10 @@ async def agent(*, model: str, messages: list, tools: list = None,
     text = data.get("result", "")
     stop = data.get("stop_reason", "end_turn")
     usage = data.get("usage", {})
-
-    # Structured output comes in structured_output field
     structured = data.get("structured_output")
 
-    # When structured output is present, put it in content as JSON
-    # so the agent loop in llm.py can extract it via _extract_json
+    # When structured output is present, put it in content as JSON so the SDK
+    # loop in agent.py can extract it via _extract_json.
     if structured and not text:
         text = json.dumps(structured)
 
@@ -226,6 +280,58 @@ async def agent(*, model: str, messages: list, tools: list = None,
         "num_turns": data.get("num_turns"),
         "duration_ms": data.get("duration_ms"),
     }}
+
+
+@provides("chat", serves=["opus", "sonnet", "haiku", "claude-*"])
+@returns({"content": "string", "tool_calls": "array", "stop_reason": "string", "usage": "object"})
+@connection("code")
+@timeout(1800)
+async def chat_cli(*, model: str, messages: list = None, prompt: str = None,
+         tools: list = None, temperature: float = 0, system: str = None,
+         output_schema: dict = None, **params) -> dict:
+    """One Claude completion via the local Claude Code CLI — subscription auth, no loop.
+
+    A single `claude -p` with no `--mcp-config` and an empty tool allowlist:
+    Claude can use no tools, answers directly, and hands back the final message.
+    This is the `@provides("chat")` twin of `agent()`. `claude -p` can't emit
+    request-style `tool_calls` for a caller's loop to execute, so a Claude
+    tool-loop routes to `agent()` (native), never to `chat_cli(tools=...)` — the
+    `tools` arg here is ignored.
+
+    Named `chat_cli` (not `chat`) because `claude_api.py` already defines `chat`
+    and app tool names share a flat namespace across the app's `.py` files.
+
+    Model IDs come from the graph (list_models). No hardcoded aliases.
+    """
+    return await _run_claude_p(
+        model=model, messages=_ensure_messages(messages, prompt), system=system,
+        output_schema=output_schema, with_tools=False,
+    )
+
+
+@provides("agent", serves=["opus", "sonnet", "haiku", "claude-*"],
+          features=["tool_calling", "structured_output", "structured_output_with_tools"])
+@returns({"content": "string", "tool_calls": "array", "stop_reason": "string", "usage": "object"})
+@connection("code")
+@timeout(1800)
+async def agent(*, model: str, messages: list = None, prompt: str = None,
+         tools: list = None, temperature: float = 0, system: str = None,
+         output_schema: dict = None, **params) -> dict:
+    """Run Claude as an agent via the local Claude Code CLI — uses existing auth, no API key.
+
+    Unlike `chat` (a single completion), this runs a full agent loop: Claude
+    calls tools, reads results, and iterates until done. The returned content is
+    the final answer after all intermediate tool use. Attaches agentOS as an MCP
+    server so Claude handles tool calling natively (no XML-in-prompt hack); when
+    `output_schema` is set, uses `--json-schema` for native structured
+    validation. Both compose — tools + structured output in the same call.
+
+    Model IDs come from the graph (list_models). No hardcoded aliases.
+    """
+    return await _run_claude_p(
+        model=model, messages=_ensure_messages(messages, prompt), system=system,
+        output_schema=output_schema, with_tools=True,
+    )
 
 
 # ---------------------------------------------------------------------------

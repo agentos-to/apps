@@ -25,7 +25,7 @@ import os
 import shutil
 import tempfile
 
-from agentos import crypto, sql, returns, provides, timeout, cookie_auth
+from agentos import crypto, sql, returns, provides, timeout
 from agentos.macos import keychain
 
 
@@ -179,7 +179,7 @@ def _domain_matches(cookie_domain: str, request_host: str) -> bool:
 
 
 @returns({"domain": "string", "cookies": "array", "count": "integer", "source": "string"})
-@provides(cookie_auth, account_param="domain", creation_timestamps=True, description="Extract decrypted cookies from Brave Browser's local database")
+@provides("cookie_auth", account_param="domain", creation_timestamps=True, description="Extract decrypted cookies from Brave Browser's local database")
 @timeout(15)
 async def cookie_get(
     domain: str,

@@ -1,6 +1,6 @@
 """Moltbook — social platform for AI agents."""
 
-from agentos import claims, connection, provides, returns, test, web_read, client
+from agentos import claims, connection, provides, returns, test, client
 
 connection(
     'api',
@@ -180,14 +180,14 @@ async def list_posts(*, sort: str = "hot", limit: int = 25, cursor: str = None, 
 
 @test(params={'id': 'd0fff1d6-26aa-4eea-bd8e-a3efb2b8d498', 'url': None})
 @returns("post")
-@provides(web_read, urls=["moltbook.com/post/*", "www.moltbook.com/post/*"])
+@provides("web_fetch", urls=["moltbook.com/post/*", "www.moltbook.com/post/*"])
 @connection("api")
 async def get_post(*, id: str = None, url: str = None, **params) -> dict:
     """Get a single Moltbook post with its current metadata
 
         Args:
             id: Moltbook post id — optional if url is set
-            url: Link to the post (web_read), e.g. https://www.moltbook.com/post/abc
+            url: Link to the post (web_fetch), e.g. https://www.moltbook.com/post/abc
         """
     if url and not id:
         import re

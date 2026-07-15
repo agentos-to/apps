@@ -5,7 +5,7 @@ pattern): every op runs as a same-origin ``fetch()`` evaluated inside a tab
 of the engine-owned browser via the ``browser_session`` service. The session
 IS the browser profile.
 
-Auth mechanics (see requirements.md for the full endpoint inventory):
+Auth mechanics (see dev/requirements.md for the full endpoint inventory):
 - United's auth + Akamai bot-manager cookies (AuthCookie, Session, User,
   PIM-SESSION-ID, 1pc_session, _ucid, _abck, bm_*, ak_bmsc, akacd_*) live on
   ``.united.com`` in the browser profile, written by United's own Set-Cookie —
@@ -25,7 +25,7 @@ profile. ``login`` reports the live session or returns a NeedsAuth challenge
 telling the human to sign in once headed (United's username+password+MFA behind
 Akamai is best cleared by a real browser, not driven blind).
 
-Template: apps/web/exa/exa.py, apps/dev/greptile/greptile.py.
+Template: apps/cross-platform/exa/exa.py, apps/cross-platform/greptile/greptile.py.
 """
 
 import json as _json
@@ -58,7 +58,7 @@ _UNITED = "www.united.com"
 # same-origin fetch('/api/auth/anonymous-token') in the tab returns the
 # user-scoped token (the cookies are right there), and we thread that bearer as
 # `X-Authorization-api` on subsequent in-tab fetches exactly as United's
-# frontend does. Template: apps/web/exa/exa.py, apps/dev/greptile/greptile.py.
+# frontend does. Template: apps/cross-platform/exa/exa.py, apps/cross-platform/greptile/greptile.py.
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -88,7 +88,8 @@ async def _eval(body: str, *, timeout_s: int = 45):
     only once the tab has settled on a united.com origin, with ``__onApp`` in
     scope (False when United bounced us to its sign-in page — logged out).
     """
-    return await services.call(services.browser_session, params={
+    return await services.call("browser_session", verb="eval", params={
+        "mode": "background",  # headless bg profile (rule 19) — never the daily browser
         "target": _UNITED,
         "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
         "timeout": timeout_s,
@@ -547,12 +548,13 @@ async def login(**params) -> dict:
         "No live United session in the AgentOS browser profile. United's "
         "login (username + password + MFA behind Akamai bot-manager) is best "
         "cleared by a human. Open the headed sign-in window for them: call "
-        "the `login_window` service with "
-        "url=https://www.united.com/en/us/account/sign-in, poll "
-        "check_session until authenticated, then login_window(close=true). "
-        "The session lands in the profile and these ops just work.",
+        "the `login_window` service with url=https://www.united.com/en/us/ "
+        "(no stable sign-in URL exists — united.com/...account/sign-in 404s; "
+        "the human clicks the homepage's Sign in button), poll check_session "
+        "until authenticated, then login_window(close=true). The session "
+        "lands in the profile and these ops just work.",
         code="NeedsAuth",
-        login_url="https://www.united.com/en/us/account/sign-in",
+        login_url="https://www.united.com/en/us/",
     )
 
 

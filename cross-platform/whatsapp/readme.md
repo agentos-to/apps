@@ -22,11 +22,31 @@ in-page Store collections.
 
 ## Requirements
 
-- **Brave Browser** installed (the engine launches its own instance with a
-  dedicated profile at `~/.agentos/browsers/brave`)
-- **One-time link**: on first use the engine opens web.whatsapp.com — scan
-  the QR code with your phone (Settings → Linked Devices). The session
-  persists in the engine-owned profile; ops return `NeedsAuth` until linked.
+- **Brave Browser** installed (the engine runs its own HEADLESS instance on a
+  dedicated background profile at `~/.agentos/browsers-bg/brave`)
+- **One-time link**: on first use the QR is read *headless* off web.whatsapp.com
+  and returned as a scannable text artifact — scan it with your phone (Settings
+  → Linked Devices). The session persists in the engine-owned background
+  profile; ops return `NeedsAuth` until linked. No browser window ever opens —
+  WhatsApp is the reference headless connector (its payload surfaces in the
+  Messaging app, so no window is the right surface — CLAUDE.md rule 19).
+
+## Linking (for the agent)
+
+When ops return `NeedsAuth`, the session has expired or was never linked. The QR
+kind of the login protocol — headless, no window:
+
+1. `whatsapp.login` — reads the linked-device QR off the page (`div[data-ref]`)
+   and returns an `auth_challenge{kind: "qr"}` whose `artifact` is the QR as a
+   scannable Unicode block (`qr.text(ref)`). No window opens.
+2. The human scans the artifact (WhatsApp phone → Settings → Linked Devices →
+   Link a Device).
+3. Poll `whatsapp.check_session` until it returns `authenticated: true`.
+
+The session then persists in the engine-owned background profile — no re-link
+needed across engine restarts. (Contrast the `login_window` kind — Outlook,
+Instagram — which flips this same profile *headed* for a sign-in that can't be
+scanned; WhatsApp needs no window because its QR is text.)
 
 ## IDs
 
@@ -36,14 +56,20 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
 
 ## Common Tasks
 
-- **Active chats:** `list_conversations` (non-archived, most recent first)
+- **Active chats:** `list_conversations` (non-archived, most recent first;
+  skips local new-chat stubs with no `__x_t` — same as WhatsApp's own list)
 - **Archived chats:** `list_conversations` with `archived: true`
 - **Unread messages:** `list_messages` with `is_unread: true`
 - **Chat history:** `list_messages` with `conversation_id` — pages earlier
   history into memory until `limit` is reached
+- **Status stories:** `list_posts` — WhatsApp Status (24h stories) as
+  `post` rows (`postType: story`); brokered as `feeds` for the Social app
+- **One story + media:** `get_post` with a status message id — hydrates
+  image/video into the blob store (`attaches[0].path`)
 - **Group members:** `list_persons` with `conversation_id` (opens the chat
   to trigger WhatsApp's lazy participant load — takes a few seconds)
-- **Send:** `send_message` with `to` + `text`
+- **Send:** `send_message` with `to` + `text`; pass `reply_to` (a
+  serialized message id) to quote/reply to that message
 - **Send media:** `send_media` with `to` + `path` (a blob-store path) +
   optional `caption`; `ptt: true` sends an ogg/opus file as a voice note
 - **React:** `send_reaction` with `emoji` + either `chat` (latest
@@ -99,35 +125,79 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
   Arm once, ever.
 - Chats are `@lid`-keyed (WhatsApp's post-2026 chat ids); groups stay
   `@g.us`. `list_persons` resolves LIDs to names + phone JIDs via Contacts.
+- **A send that parks (`SendFailed`, "parked at ack 0") while
+  `check_session` stays healthy means the tab's session socket died** —
+  classically because a second `web.whatsapp.com` tab claimed the session
+  (WhatsApp Web is single-tab). The failure is typed and fast:
+  `send_message`/`send_media` bound the inner wire promise with a 15s
+  race (well inside the 45s eval timeout) and return `SendFailed`
+  carrying the live diagnosis (parked `ack`, `Socket.state`, `Conn.ref`)
+  instead of burning the eval timeout as UNKNOWN. Read the diagnosis
+  knowing the state fields lie in both directions: `Socket.state` reads
+  `CONNECTED` on a dead wire, and `Conn.ref` is `false` even on a healthy
+  tab — the parked `ack: 0` is the tell. Duplicates can no longer be
+  minted by the engine: `browser_session` target resolution enforces a
+  single-tab invariant per target in the engine-owned profiles
+  (find-or-reuse by adopted tab id + registrable domain, extras closed on
+  attach, a wedged `/json` is an error rather than an empty tab list).
+  Recovery from a dead socket: `browser_session` `verb: reload` for
+  `web.whatsapp.com` — a fresh page load re-negotiates the session.
+  Closing only a duplicate does NOT hand the socket back to the surviving
+  tab (verified live 2026-07-06); a fresh load of the sole tab does.
+  Engine restarts don't clear a steal on their own (the background
+  browser survives them). Was `issue-whatsapp-tab-steal-silent-send-park`
+  on the product board.
 
 ## Entity Model
 
 - **person** — the human, with name and phone from WhatsApp contacts
 - **account** — their WhatsApp identity (JID), on `person.accounts` /
   `message.from` / `conversation.participant`
-- **conversation** — a chat thread (`isGroup`, `isArchived`, `unreadCount`)
+- **conversation** — a chat thread (`isGroup`, `isArchived`, `unreadCount`);
+  `image` is a blob-store path + `mimeType` when a profile thumb is warm
+  (fetched in-page from `ProfilePicThumb`, staged via `blobs.put`)
 - **message** — `content`, `published`, `isOutgoing`, `author`,
   `conversationId`, `type`
+- **post** — a Status story item (`postType: story`, `expiresAt` =
+  published+24h, `authorId` / `ringTotal` / `ringUnread` for the rail,
+  `mediaType`, `viewed`). About-bio text is NOT a post.
 
 ## Internals (for maintainers)
 
 Payloads use WhatsApp Web's module system: `WAWebCollections` (Chat / Msg /
-Contact), `WAWebChatLoadMessages.loadEarlierMsgs`, `WAWebSendMsgChatAction.
+Contact / **Status**), `WAWebChatLoadMessages.loadEarlierMsgs({ chat })` (object arg —
+bare model throws `waitForChatLoading undefined`), `WAWebSendMsgChatAction.
 addAndSendMsgToChat`, `WAWebSendReactionMsgAction.sendReactionToMsg`,
-`WAWebCmd.openChatAt`, `WAWebMsgKey.newId/fromString` (send ids),
-`WAWebUserPrefsMeUser.getMeUser` (login probe),
+`WAWebCmd.Cmd.openChatAt({ chat })` (`Cmd` is nested under the module export,
+not a top-level export; call shape is `{ chat }`, not bare model),
+`WAWebMsgKey.newId/fromString` (send ids),
+`WAWebUserPrefsMeUser.getMaybeMePnUser` (login probe — the phone WID;
+`getMaybeMeLidUser` is its LID twin),
+`WAWebFindChatAction.findOrCreateLatestChat(wid)` (send-side chat
+creation for a JID with no existing thread — returns `{chat}`; the bare
+`Chat.find(wid)` throws `findImpl is not a function` on current builds),
 `WAWebChatStateBridge.sendChatStateComposing/Recording/Paused(wid)`
 (typing), `WAWebPresenceChatAction.sendPresenceAvailable/Unavailable()`
 (online dot), `Msg.search(query, page, count, remote)` (server-side
 search — positional args, 1-based page, `remote` = chat JID string or
-undefined), and the media-send pipeline `WAWebMediaOpaqueData.
+undefined), **Status stories** via `WAWebCollections.Status.getModelsArray()`
+(each model is one author's ring; `status.msgs` holds the items — wwebjs
+`getBroadcasts` / `Broadcast`), send/revoke later via
+`WAWebSendStatusMsgAction` / `WAWebRevokeStatusAction`, and the media-send pipeline `WAWebMediaOpaqueData.
 createFromData → WAWebPrepRawMedia.prepRawMedia → WAWebMediaStorage.
 getOrCreateMediaObject → WAWebMmsMediaTypes.msgToMediaType →
 WAWebMediaMmsV4Upload.uploadMedia → mediaData.set(entry) → spread
 `mediaData.toJSON()` into the full message construct`. Model fields
 carry the `__x_` prefix. If WhatsApp ships a breaking Web update, the
 whatsapp-web.js project is the reference for re-deriving module names
-and call shapes.
+and call shapes. Clone it locally for fast grep access — no install,
+no execution:
+
+    git clone https://github.com/pedroslopez/whatsapp-web.js ~/dev/vendor/whatsapp-web.js
+
+When bindings drift: `git -C ~/dev/vendor/whatsapp-web.js pull`, then
+grep `src/util/Injected/Store.js` and `src/util/Injected/Utils.js` for
+the current call shapes. `git log --oneline --since="2 weeks ago" -- src/util/Injected/` surfaces what changed and when.
 
 **Linked-device branding** (`login` applies this before pairing): the
 phone's Linked Devices entry derives from `WAWebBrowserInfo()` at
@@ -143,6 +213,13 @@ once at pairing and cannot be changed after; re-link to re-brand.
 
 Drift traps already survived (patterns to keep):
 
+- **`getMeUser()` was deleted (~2026-07 Web refresh)** — the me-user probe
+  is `getMaybeMePnUser()` (phone WID) / `getMaybeMeLidUser()` (LID). The
+  old symptom was the nastiest kind: every op reported `auth_required` /
+  `authenticated: false` for a perfectly linked session (the prelude
+  conflated "no me-user" with "logged out"). The prelude now separates
+  them: QR on screen → `NeedsAuth`; live Store with no me-user →
+  `BindingDrift`, loud.
 - **Unset model fields are truthy sentinel objects**
   (`{sentinel: 'DEFAULT VALUE PLACEHOLDER'}`), not undefined. Never branch
   on truthiness — the helpers' `str()` / `Number.isFinite` / `=== true`
@@ -176,7 +253,23 @@ Drift traps already survived (patterns to keep):
   `addPoint` returning `this`). The higher-level `downloadMsg` path
   resolves the mediaObject but parks the bytes out of reach
   (`mediaBlob` stays null, `contentInfo.staticUrl` empty in headless).
+- **`loadEarlierMsgs` and `openChatAt` both take `{ chat }` objects**, not
+  bare chat models. Passing the model directly causes `waitForChatLoading
+  undefined` (loadEarlierMsgs) or `Cannot read properties of undefined
+  (reading 'id')` (openChatAt) — both are the same drift: the function
+  signature changed from a positional model arg to a destructured options
+  object. `Cmd` itself is nested: `const { Cmd } = window.require('WAWebCmd')`.
 - **`__debug.modulesMap` only enumerates LOADED modules** —
   `window.require` lazy-loads on demand. A module missing from the map
   (e.g. `WAWebDownloadManager`) may still require() fine; probe by name
   before concluding drift.
+- **Status ≠ About bio.** `Contact.__x_status` / `WAWebContactStatusBridge`
+  is the profile "Hey there!" string. Stories live on
+  `WAWebCollections.Status` (`status@broadcast` / `isStatusV3`). Expiry is
+  computed (`unixTime - status.t > 86400`), not a stored field —
+  `list_posts` stamps `expiresAt = published + 24h`. `status.msgs` is
+  usually warm after sync; `loadMore` is a no-op stub on current builds.
+  `msg.viewed` + `sendReadStatus` exist for view receipts (not wired yet).
+  Author faces: warm `ProfilePicThumb.get` first; cold authors use
+  `ProfilePicThumb.find(WidFactory.createWid(jid))`, then in-page fetch +
+  `blobs.put` (same staging path as chat-list avatars).

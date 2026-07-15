@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+JS="${1:?usage: greval '<js body ending in return …>'}"
+FULL=$(python3 -c "
+import json,sys
+body=sys.argv[1]
+payload='(async()=>{'+body+'})()'
+print(json.dumps({'op':'browser_session','params':{'verb':'eval','target':'mail.google.com','mode':'background','js':payload}}))
+" "$JS")
+agentos call services "$FULL"

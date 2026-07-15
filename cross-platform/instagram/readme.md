@@ -2,6 +2,9 @@
 id: instagram
 name: Instagram
 description: Live Instagram DMs via the logged-in web client — read, send, and watch new direct messages in real time by hooking Instagram's own React/Relay store
+services:
+  - blobs
+  - http
 color: "#E1306C"
 website: "https://www.instagram.com/"
 product:
@@ -23,11 +26,35 @@ message as a normalized record in its **React/Relay store**; we hook that
 store — exactly as the WhatsApp plugin hooks `WAWebCollections.Msg` — and never
 touch the encrypted wire ourselves.
 
-> **Status: working (2026-07-06).** Read (`list_conversations`/`list_messages`),
-> live `watch` (real-time receive), and `send_message` are all *proven
-> end-to-end* against Joe's real logged-in session on `mode:attach` (see
-> Internals → "What's proven"). Remaining niceties: reactions, typing,
-> mark-read. This readme is the durable reference.
+> **Mode: `background` (migrated 2026-07-08).** The connector now runs headless
+> in the engine's background profile like WhatsApp — DMs surface in the Messaging
+> app, so no window is needed for a read (CLAUDE.md rule 19). Login is the
+> `login_window` kind: a headed flip of that same profile for the sign-in
+> (`browser_session.login_window`), so IG's device-fingerprint check sees one
+> consistent profile from sign-in onward — no cookie-copy, no cross-profile
+> mismatch. The RE proof-log below (the `mode:attach` notes) is the 2026-07-07
+> baseline that established the verbs; the transport is identical either mode.
+>
+> **RE baseline (2026-07-07).** The full verb set was proven end-to-end
+> against Joe's real logged-in session on `mode:attach`: read
+> (`list_conversations`/`list_messages`/`list_persons`), live `watch`,
+> `send_message`, `send_reaction` (add/remove), `get_message` media hydration,
+> **`mark_read`** (Relay `useIGDMarkThreadAsReadMutation` replay), and
+> **`send_typing`** (IG's own `IGDMAPISendTypingIndicator` over MQTT) — the last
+> two shipped 2026-07-07 (variable shapes lifted from the live modules; see
+> [`operations.md`](./operations.md), which is the durable reverse-engineering
+> reference for every op's transport, doc_id, and capture recipe — read it
+> before re-deriving anything). Conversations + persons now also carry the other
+> party's `@handle` as a nested `participant`/`accounts` account. Remaining: a
+> few rare read content types (mentions, view-once — see "Content model &
+> backlog"). This readme is the durable reference.
+>
+> **Reads never navigate.** `_ensure_dm` only hard-loads /direct when the tab is
+> OFF a DM surface; the Relay store is cumulative and the armed `watch` parks the
+> tab on the inbox, so every read is a pure in-page eval (~180ms). The old
+> per-read `navigate` wiped the store on every call — a refresh storm that made
+> reads slow AND intermittently empty (a read landing mid-reload saw a cold
+> store). Never reintroduce an unconditional navigate in a read path.
 
 ## Why this approach (and not the alternatives)
 
@@ -82,7 +109,10 @@ unchanged:
 ## Common Tasks (target API — some unbuilt)
 
 - **Active chats:** `list_conversations`
-- **Chat history:** `list_messages` with `conversation_id`
+- **Chat history:** `list_messages` with `conversation_id` (reaches full history — paginates on demand)
+- **Stories (feeds):** `list_posts` — home-tray rings as `post` (`postType: story`); brokered as `feeds` for Social
+- **One story ring / item:** `get_post` with `story:<user_pk>` or `story:<user_pk>:<media_pk>` — replays `PolarisStoriesV3ReelPageStandaloneQuery`, hydrates media → `attaches` + `ringPosts`
+- **Media bytes:** `get_message` with `id` — downloads a message's image/video/GIF/voice-note into the blob store (`attaches[]`)
 - **Send:** `send_message` with `to` + `text`
 - **Watch (live push):** `watch` — arm once; new DMs stream into the graph as `message` entities
 - **React / typing / mark-read:** `send_reaction` / `send_typing` / `mark_read`
@@ -106,9 +136,18 @@ Instagram on 2026-07-06. Re-probe with `browser.eval` (mode `attach`, target
 | Sender join: `SlideMessage.sender` → `SlideUser {name,id=fbid,igid,user_dict}` → `XDTUserDict {username,full_name,profile_pic_url}` | ✅ proven | all 253 resolve to @username |
 | Viewer fbid = `SlideUser` where `igid == ds_user_id` cookie | ✅ proven | dsid `27323288` → fbid `111600823566513`; correctly flags own messages |
 | `list_conversations` from `XFBIGDirectViewerThread {thread_fbid, thread_title, is_group, marked_as_unread, last_activity_timestamp_ms}` | ✅ proven | 16 threads, real names ("Grove St", …) |
+| **Stories tray → `list_posts` / `feeds`** | ✅ **proven** | `XDTMaterialTray` / `XDTReelDict` on home `/` (`xdt_api__v1__feed__reels_tray`); seen≥latest sorts to end; faces staged |
+| **Story media → `get_post`** | ✅ **proven** | `PolarisStoriesV3ReelPageStandaloneQuery` `{reel_ids_arr}` → `XDTMediaDict` items; CDP `response_body` → blobs (image + video) |
 | **Read ops run end-to-end through real engine dispatch** (not just probes) | ✅ proven | `plugins.run` `mode:attach`: `check_session` (111ms), `list_messages`, `list_conversations` all return correct entities |
 | **`watch` push — full pipeline: live DM → graph `message` node** | ✅ **proven end-to-end** | armed via `plugins.run instagram.watch`; a live "pineapple" DM surfaced as graph node `wkeqg3` (`author:"Me"`, `isOutgoing:true`, thread + ts) ~instantly. Path: store `publish` → CDP console marker → `live_entity::write` → graph. |
 | **`send_message` — composer-UI drive + event-driven receipt** | ✅ **proven end-to-end** | 4 live DMs to @ksubedi via `plugins.run`; navigate `/direct/t/<thread_fbid>/` → type into `role:textbox` → `key Enter` (IG does the E2EE send); receipt resolves on `store.publish` |
+| **`send_reaction` — Relay `commitMutation` replay (NOT UI, NOT websocket)** | ✅ **proven end-to-end** | `IGDirectReactionSendMutation` (doc_id `24374451552236906`) over POST `/api/graphql`; add ❤️/😂/👍, `remove`, and un-react all verified on @ksubedi via `plugins.run` + rendered-badge check; `conversation_id` derived from the message record |
+| **Inbound reactions folded into `message.reactions`** | ✅ proven | `SlideMessage.reactions {__refs}` → `XFBSlideReaction {reaction: emoji}` → `[{emoji, count}]` (WhatsApp's shape); 3 reacted msgs in the @ksubedi thread mapped |
+| **History pagination — `list_messages` replays IG's own loadNext** | ✅ **proven end-to-end** | `IGDMessageListOffMsysQuery {after,first:20,id}` via `createOperationDescriptor` + `env.execute`; @ksubedi 20→87 (full thread), @massimilianohasan 20→320. Cursor on `__IGDMessagesList_slide_messages_connection.page_info`. |
+| **Media download — `get_message` hydrates bytes → `blobs.put`** | ✅ **proven end-to-end** | image/video/GIF via in-page `fetch` (`*.fbcdn`/`scontent`/`external`, CORS-readable); voice notes via engine `http.request` fallback (`cdn.fbsbx.com` is CORS-blocked). All 4 verified as valid ISO-MP4/JPEG on disk. |
+| **Content typenames — image/audio/GIF/XMA subtypes** | ✅ verified live | `SlideMessageImageContent.attachments`, `…AudiosContent.audio_attachments`, `…AnimatedMediaContent.animated_media`, 5 XMA `kind`s — the earlier inferred `Photos`/`Audio`/`Voice` names were wrong, corrected against real messages |
+| `timestamp_ms` is a STRING, not a number | ✅ proven (bug fixed) | `"1783394485069"` → `Number.isFinite` false → `published` was null on every message; `num()` coercion added |
+| Reactions are a plain GraphQL mutation, NOT the E2EE MQTT wire | ✅ proven | transport probe (wrap `execute`+fetch+xhr+ws): a manual ❤️ fired ONLY Relay `execute` — no ws frame carried it |
 | Watch + send both ride Relay's `store.publish(delta)` change signal — no polls, no full scans | ✅ proven | `publish` carries a RecordSource of ONLY the changed records (`getRecordIDs`/`get`); 43 deltas in 4s. Reads Relay's own change-set. |
 | `store.subscribe` / `store.notify` exist and are callable | ✅ proven | `typeof === 'function'` on the live store |
 | Nothing decoded is exposed on `window` (no global store, no Relay/React devtools hook in prod) | ✅ proven | `window` scan; `__RELAY_DEVTOOLS_HOOK__`/`__REACT_DEVTOOLS_GLOBAL_HOOK__` absent |
@@ -255,40 +294,46 @@ threads warm). No inbox-poll backstop needed for loaded threads.
   Required headers on these: `X-IG-App-ID: 936619743392459`, `X-CSRFToken:
   {csrftoken cookie}`, `X-Requested-With: XMLHttpRequest`.
 
-## Reactions — reverse-engineering notes (IN PROGRESS, not built)
+## Reactions — PROVEN (send + read)
 
-`send_reaction` is stubbed. Reactions are harder than text send (no simple
-composer surface). Learned probing live 2026-07-06:
+Reactions ride a plain **Relay GraphQL mutation**, not the E2EE MQTT wire — so
+`send_reaction` replays IG's own operation; no UI drive needed. (Transport found
+with the recipe documented at the top of `instagram.py`.)
 
-**UI path (fragile — not the recommended final impl):**
-- Hover/click a message → toolbar: face (React), reply, kebab (more). The face
-  button's `aria-label` = `React to message from <user>`; its clickable ancestor
-  (`div[role=button][aria-haspopup=dialog]`, fiber chain `IGDSIconButton →
-  BaseButton → PressableText`) has a React `onClick` that opens an emoji-picker
-  popover. Calling that `onClick` natively DID open it (confirmed visually) — but
-  a mock-event call is timing-flaky (a second call toggles it shut).
-- The picker is reachable via the face button's `aria-controls` id (or
-  heuristically: a container with 5–8 small ~48px clickable children). Its emoji
-  options are **unlabeled sprites** (no `aria-label`/text) — can't target ❤️ by
-  label; it's the **first** option (❤️ 😂 😮 😢 😡 👍, then "+"). Invoking the
-  first child's `onPress`/`onClick` should fire ❤️, but reliably finding the
-  container + surviving the picker's open/close is brittle.
+**Send — `IGDirectReactionSendMutation`** (doc_id `24374451552236906`, POST
+`/api/graphql`):
+- variables: `{ input: { emoji, item_id: "", message_id, reaction_status, thread_id } }`
+  - `emoji` — **bare codepoints**: the picker's ❤️ (U+2764 U+FE0F) is sent as
+    U+2764. `send_reaction` strips variation selectors (U+FE0E/FE0F) to match.
+  - `reaction_status` — `"created"` to add, `"deleted"` to remove (`remove=True`).
+  - `item_id` — always `""` in every capture.
+  - `thread_id` — the thread_fbid; derived from the message's own store record
+    when `conversation_id` is omitted.
+- Replay: `require('IGDirectReactionSendMutation.graphql')` → the compiled node;
+  `require('relay-runtime').commitMutation(env, {mutation, variables, onCompleted,
+  onError})`. `onCompleted` returns `xig_direct_reaction_send_with_slide_messaging_response`
+  with no errors = Instagram's own ack (so we report a confirmed `reacted`, unlike
+  WhatsApp's headless `dispatched`). The reaction module + `commitMutation` are
+  present on the cold inbox, so `send_reaction` only needs `_ensure_dm` (no thread
+  navigation — never yanks the human's open thread).
 
-**Recommended durable path — call IG's own reaction action, skip the UI:**
-1. Find the TRANSPORT first: instrument BOTH `env.getNetwork().execute` (Relay
-   mutations route through it) AND `fetch`/`XHR`, then **react ❤️ manually once**
-   and see which fires.
-2. Relay mutation / GraphQL POST → capture `doc_id` + variables (`message_id`,
-   `emoji`, `thread_fbid`) and replay (`commitMutation` on the env, or a
-   same-origin fetch). Very native.
-3. Nothing on fetch/Relay → reactions ride the **E2EE MQTT websocket** (same
-   channel text sends use) → need IG's client reaction fn (deeper dig, the way
-   the composer was the answer for text). Ids: `SlideMessage.message_id` +
-   `thread_fbid`; reaction record = `MessagingReaction`/`XFBSlideReaction`.
+**Read — folded into every `message`:** `SlideMessage.reactions {__refs}` →
+`XFBSlideReaction {reaction: emoji, sender_fbid}` (the sibling `msg_reactions` →
+`MessagingReaction` carries only sender ids, no emoji). Aggregated by emoji into
+`[{emoji, count}]` — the same shape WhatsApp emits. Reactions hydrate with the
+thread (a cold read before the thread's reaction connection loads shows none).
+
+**UI path (rejected — fallback note only):** click a message bubble → toolbar
+(React/Reply/More); the React button (`aria-label "React to message from
+<user>"`) opens an emoji picker whose quick emoji are **now labeled** (aria-label
+= the emoji itself, ❤️ first) — the "unlabeled sprites" note was stale. It works,
+but the mutation replay is cleaner: no snapshot/scroll, hits off-screen messages,
+one call, real server ack.
 
 **Shared-browser gotcha:** the attach browser is shared — another agent's tab can
-refresh instagram.com mid-probe and wipe picker/hook state (happened 2026-07-06).
-`watch` auto-reinstalls on reload; ad-hoc probe state does not.
+refresh instagram.com mid-probe and wipe hook/probe state (happened repeatedly
+2026-07-06). `watch` auto-reinstalls on reload; ad-hoc probe state does not, so
+instrument → trigger → read in a tight window.
 
 ## IndexedDB map (history / persistence layer)
 
@@ -315,21 +360,114 @@ iMessage-`chat.db`-style history read).
 
 If IG ships a breaking Web update: re-run the fiber-walk probe (Relay's env-on-fiber
 location is stable API-wise; only `__typename`s / field names drift). For protocol
-reference, `go.mau.fi/mautrix-meta/pkg/messagix` reverse-engineers the same schema.
+reference, `go.mau.fi/mautrix-meta/pkg/messagix` reverse-engineers the same schema
+(but note: messagix *hardcodes* doc_ids in a Go map — they rot on every Meta deploy).
+
+**Operation doc_ids — never hardcode.** Resolve at runtime:
+`require('<Op>.graphql').params.id` (via `browser.eval`), exactly as
+`send_reaction` does. To rediscover operation *names* after a breaking build,
+re-dump the client module registry — the general method (bundler-agnostic, reads
+the registry out of `require`'s V8 `[[Scopes]]` closure over CDP) is at
+`read({id:"reverse-engineering-runtime-internals", volume:"system"})`; the
+resulting IG Direct operation catalog + transport map is in
+[`operations.md`](./operations.md).
+
+## Content model & backlog
+
+`mapMsg` branches on the CONTENT record's `__typename` (more robust than the
+`content_type` enum) and attaches media / share / system bodies + reply + flags.
+**These typenames were VERIFIED against real messages (2026-07-06/07, @ksubedi +
+@massimilianohasan threads) — the earlier inferred names (`SlideMessagePhotosContent`,
+`SlideMessageAudioContent`/`VoiceContent`, `c.photos`/`c.audios`) were WRONG and
+never fired.** The real map:
+
+| content `__typename` | what | media field | read status |
+|---|---|---|---|
+| `SlideMessageText` | plain text (also inlined on `text_body`) | — | ✅ verified |
+| `SlideMessageAdminText` | system log line → `type:'system'` (folds `text_fragments`) | — | ✅ verified |
+| `SlideMessageVideosContent` | video → `media[]` | `videos` | ✅ verified + downloaded |
+| `SlideMessageImageContent` | photo → `media[]` | `attachments` | ✅ verified + downloaded |
+| `SlideMessageAudiosContent` | voice note → `media[]` (`durationMs` from `playable_duration_ms`) | `audio_attachments` | ✅ verified + downloaded |
+| `SlideMessageAnimatedMediaContent` | GIF/sticker → `media[]` (`attachment_mp4_url`/`webp_url`) | `animated_media` | ✅ verified + downloaded |
+| `SlideMessageXMAContent` | rich share → `attachment` (`xma` deref) | — | ✅ verified (5 XMA subtypes) |
+| `SlideMessageRavenImageContent`/`…VideoContent` | **view-once ("Raven")** → `isViewOnce`, single `attachment` ref | `attachment` | ⚠️ shape captured (consumed=null); inner dict UNVERIFIED |
+
+**XMA subtypes** (`mapXma`, strips `SlideMessage…XMA` → `kind`): `Portrait` (story
+reply, `eyebrow_text`), `Standard` (link/group share, `title_text`+`target_url`),
+`Layered` (reel/post share, `title_text`+`subtitle_text`+`target_url`), `Placeholder`
++ `ExpiredPlaceholder` (unavailable/expired). All 5 verified live. `subtitle` reads
+`header_subtitle_text` ‖ `subtitle_text` ‖ `caption_body_text`.
+
+**Media download (`get_message`)** — two-stage, both PROVEN live: (1) in-page
+`fetch` for CORS-readable hosts (`*.fbcdn.net` / `scontent` / `external` — image,
+video, GIF); (2) engine-side `http.request` fallback for `cdn.fbsbx.com` **voice
+notes, which are CORS-blocked** in the browser. Bytes → base64 → `blobs.put`; no
+decryption (CDN urls are plain signed links, not E2EE-at-rest). 10MB per-item +
+cumulative cap. Needs the `blobs` + `http` services (frontmatter).
+
+`mapMsg` output additions (set only when present): `type`
+(`text`/`share`/`video`/`image`/`audio`/`animated`/`system`), `attachment {kind,
+title,subtitle,eyebrow,targetUrl,previewUrl}`, `media [{type,url,previewUrl,width,
+height,durationMs}]`, `replyTo {id,author,snippet,isOutgoing}`, `reactions
+[{emoji,count}]`, `isViewOnce`, `viewExpiresAt`/`expiresAt`, and flags
+`isForwarded`/`isPinned`/`isAiGenerated`/`isDeleted`/`isEdited`.
+
+> ⚠️ **`timestamp_ms` is a STRING** in the store (`"1783394485069"`), not a
+> number — `Number.isFinite(ms)` is false on it, so the old `isoMs` silently
+> nulled `published` on EVERY message (and broke time-ordering). The `num()`
+> helper coerces before any numeric read (timestamps, widths, durations, the
+> `0`-sentinel view/vanish expiries).
+
+**History pagination (DONE):** `list_messages(conversation_id, limit)` replays
+IG's own messages-connection loadNext — the Relay query `IGDMessageListOffMsysQuery`
+`{after: cursor, first: 20, id: thread_fbid}` via `createOperationDescriptor` +
+`env.execute` — looping until `limit` loaded or `has_next_page` is false (cursor on
+the thread's `__IGDMessagesList_slide_messages_connection` `page_info`). No scroll,
+no open thread. PROVEN: @ksubedi 20→87 (full thread), @massimilianohasan 20→320.
+The message list is a **`column-reverse`** scroller (scrollTop 0 = newest; older
+history is *negative* scrollTop) — that's how the query was captured.
+
+**Ordering (deciding rule):** never trust store-arrival order — a message's real
+`timestamp_ms` (→ `published`) is the sequence key. `watch` only streams messages
+newer than arm-time; **backfill and pagination-loaded history are NOT live
+arrivals** (they enter the store and fire `publish` too) — pull deep history via
+`list_messages`, never let it masquerade as "new". This "loaded ≠ newest" rule
+applies to any store-hook watcher (e.g. WhatsApp); IG is fixed, audit the others.
+
+Remaining (UNVERIFIED — no real example found in the @ksubedi/@massimilianohasan
+threads; coded defensively, confirm before trusting):
+- **Mentions** — `SlideMessage.mentions {__refs}`: field present but never populated
+  in probed threads; not extracted into the entity yet.
+- **Raven view-once media** — the `attachment` ref is null once consumed, so the
+  inner media dict shape is unconfirmed; `isViewOnce` + type are set, media may not
+  hydrate.
+- **Vanish/view expiries** — `expiration_timestamp_ms` / `view_expiration_timestamp_ms`
+  carry `0` (the sentinel) on normal messages; `>0` surfaces as `expiresAt`/
+  `viewExpiresAt` but no non-zero example was seen to confirm semantics.
 
 ## Open questions / next steps
 
-Read, live `watch`, AND `send_message` are all **done + proven end-to-end** on
-`mode:attach` (Joe's real Brave — decided 2026-07-06; the `_MODE` comment in
-`instagram.py` has the why). Remaining:
+Read, live `watch`, `send_message`, AND `send_reaction` (add/remove) are **done +
+proven end-to-end** on `mode:attach` (Joe's real Brave — decided 2026-07-06; the
+`_MODE` comment in `instagram.py` has the why). Remaining:
 
-1. **Reactions** — `send_reaction` is stubbed; see "Reactions — reverse-engineering
-   notes" above. Next: instrument transport (Relay `execute` + fetch/XHR), react
-   ❤️ manually once, see what fires, then replay/call it.
-2. **Typing + mark-read** — `send_typing`/`mark_read` stubbed; try the
-   `/direct_v2/threads/{id}/activity/` and `/items/{id}/seen/` in-page fetches (or
-   the reaction-style action once found). Also fold READ reactions on inbound
-   messages (`msg_reactions` `{__refs}` → `MessagingReaction`) into `mapMsg`.
+1. **Typing + mark-read** — `send_typing`/`mark_read` still stubbed, but their
+   transports are now **resolved** (module-registry dump, 2026-07-06 — full detail
+   in [`operations.md`](./operations.md)):
+   - **mark-read is a Relay GraphQL mutation** — `useIGDMarkThreadAsReadMutation`
+     (doc_id `27356881703909995`); replay via `commitMutation` exactly like
+     `send_reaction`. (The earlier "*might* be a mutation" is confirmed: the
+     `useIGDMarkThreadAsRead` module depends on `CometRelay` +
+     `useIGDMarkThreadAsReadMutation.graphql` and its body calls `.useMutation()`.)
+   - **typing-send rides MQTT** — `IGDMAPISendTypingIndicator` publishes over
+     `MqttBypassDGWClient` (`indicate_activity`) — which is *why* typing fired no
+     Relay/fetch/XHR. Cleanest impl: call IG's own `IGDMAPISendTypingIndicator`
+     rather than reimplement the wire. (Receive-typing is a GraphQL subscription.)
+
+   Both mechanisms were confirmed by reading the dispatching modules' deps (no
+   live send fired); each still needs one end-to-end send test before shipping.
+   Do NOT ship the stale `/direct_v2/…` REST endpoints unverified.
+2. **Richer read content** — see "Content model & backlog" above.
 3. Delete the old `_joe/apps/.needs-work/instagram` stub (endpoint inventory now
    captured here under "Send strategy").
 

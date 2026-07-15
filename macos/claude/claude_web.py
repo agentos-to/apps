@@ -19,7 +19,7 @@ in the tab.
 import json
 import re
 
-from agentos import account, app_error, claims, connection, credentials, normalize_email, provides, returns, services, test, timeout, web_read
+from agentos import account, app_error, claims, connection, credentials, normalize_email, provides, returns, services, test, timeout
 
 BASE_URL = "https://claude.ai"
 
@@ -49,7 +49,8 @@ const __loggedOut = location.pathname.indexOf('/login') === 0
 
 async def _eval(body: str, *, timeout_s: int = 45):
     """Run an op body inside the claude.ai tab in the engine-owned browser."""
-    return await services.call(services.browser_session, params={
+    return await services.call("browser_session", verb="eval", params={
+        "mode": "background",  # headless bg profile (rule 19) — never the daily browser
         "target": _TARGET,
         "js": "(async () => {\n" + _PRELUDE + body + "\n})()",
         "timeout": timeout_s,
@@ -208,7 +209,7 @@ async def list_conversations(*, org=None, limit=50, offset=0, **params) -> list:
 
 
 @returns("conversation")
-@provides(web_read, urls=["claude.ai/chat/*", "www.claude.ai/chat/*"])
+@provides("web_fetch", urls=["claude.ai/chat/*", "www.claude.ai/chat/*"])
 @connection("none")
 @timeout(45)
 async def get_conversation(*, id=None, url=None, org=None, **params) -> dict:
@@ -216,7 +217,7 @@ async def get_conversation(*, id=None, url=None, org=None, **params) -> dict:
 
         Args:
             id: Conversation UUID — optional if url is a claude.ai/chat/… link
-            url: Claude chat URL copied from the browser (web_read)
+            url: Claude chat URL copied from the browser (web_fetch)
             org: Org UUID (omit to use session default)
         """
     conv_id = id

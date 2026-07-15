@@ -1,6 +1,6 @@
 """Hacker News — public Algolia API, no auth required."""
 
-from agentos import provides, returns, test, web_read, client
+from agentos import provides, returns, test, client
 
 BASE = "https://hn.algolia.com/api/v1"
 SITE = "https://news.ycombinator.com"
@@ -33,6 +33,7 @@ def _map_hit(hit: dict) -> dict:
         "score": hit.get("points"),
         "commentCount": hit.get("num_comments"),
         "posted_by": {
+            "shape": "account",
             "id": author,
             "name": author,
             "url": _user_url(author),
@@ -50,12 +51,14 @@ def _map_item(item: dict) -> dict:
         cid = str(c.get("id", ""))
         cauthor = c.get("author", "")
         return {
+            "shape": "post",
             "id": cid,
             "content": c.get("text"),
             "url": _post_url(cid),
             "author": cauthor,
             "published": c.get("created_at"),
             "posted_by": {
+                "shape": "account",
                 "id": cauthor,
                 "name": cauthor,
                 "url": _user_url(cauthor),
@@ -74,6 +77,7 @@ def _map_item(item: dict) -> dict:
         "score": item.get("points"),
         "commentCount": len(children),
         "posted_by": {
+            "shape": "account",
             "id": author,
             "name": author,
             "url": _user_url(author),
@@ -122,13 +126,13 @@ async def search_posts(query: str, limit: int = 30, **params) -> list[dict]:
 
 @test(params={"id": "1"})
 @returns("post")
-@provides(web_read, urls=["news.ycombinator.com/item*"])
+@provides("web_fetch", urls=["news.ycombinator.com/item*"])
 async def get_post(id: str = None, url: str = None, **params) -> dict:
     """Get a Hacker News story with comments.
 
     Args:
         id: Story ID (optional if url is a news.ycombinator.com item link)
-        url: HN item URL with id= in the query (web_read)
+        url: HN item URL with id= in the query (web_fetch)
     """
     if url and not id:
         import re
@@ -170,13 +174,14 @@ async def comments_post(id: str, **params) -> list[dict]:
             "score": node.get("points"),
             "commentCount": len(node.get("children", [])),
             "posted_by": {
+                "shape": "account",
                 "id": author,
                 "name": author,
                 "url": _user_url(author),
             } if author else None,
         }
         if parent_id:
-            post["repliesTo"] = {"id": parent_id}
+            post["repliesTo"] = {"shape": "post", "id": parent_id}
         result.append(post)
         for child in node.get("children", []):
             flatten(child, nid)

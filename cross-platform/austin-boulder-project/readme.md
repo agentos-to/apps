@@ -14,6 +14,12 @@ Class schedules and booking for the [Austin Bouldering Project](https://austinbo
 
 Built on the **Tilefive** platform (`approach.app`), authenticated via **AWS Cognito**.
 
+> **Before extending this app** (dev only), read:
+> 1. [Adding Login](apps-adding-login on the system volume) — Cognito / portable credentials
+> 2. [dev/requirements.md](./dev/requirements.md) — Tilefive API RE notes
+>
+> **Layout** — runtime = `readme.md` + `abp.py`; RE = `dev/` (never injected).
+
 ## Setup
 
 No credentials needed to view the schedule — `get_schedule` is fully public.
@@ -119,7 +125,7 @@ Enrichment:
 - `image` — `event.imageURL` (class series photo), else activity avatar
 - `performer` — instructor as `person` (Tilefive `staff` when filled;
   otherwise parsed from the `w/` title suffix). Instructor photos are
-  **not** on `/cal` today — see `requirements.md`.
+  **not** on `/cal` today — see `dev/requirements.md`.
 - `activityType` — from `event.activities[]` (Tilefive spelling; legacy
   `activitys` still accepted)
 
@@ -160,7 +166,7 @@ the explicit id returned by `get_my_memberships`.
 
 ## Technical Notes
 
-See `requirements.md` for full reverse-engineering notes on the Tilefive API.
+See [dev/requirements.md](./dev/requirements.md) for full reverse-engineering notes on the Tilefive API.
 
 Key discoveries:
 - `Authorization` header on the widgets API is the namespace string (`boulderingproject`), not a JWT

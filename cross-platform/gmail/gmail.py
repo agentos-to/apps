@@ -4,14 +4,16 @@ All public functions take **params. Auth token lives in
 params["auth"]["access_token"], injected by the engine from OAuth resolution.
 """
 
+import asyncio
 import base64
 import json
 import re
-from datetime import datetime
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from agentos import connection, provides, returns, timeout, web_read, client
+from agentos import connection, provides, returns, timeout, client, blobs, iso_from_ms
 
 connection(
     'gmail',
@@ -249,6 +251,214 @@ def _collect_attachments(payload):
     return results
 
 
+def _attachment_ext(filename, mime_type):
+    """Extension (no dot) naming a hydrated attachment in the blob store —
+    the filename's own suffix first, else the MIME subtype, else 'bin'.
+    (`blobs.put` sanitizes further; this just gives it a sensible hint.)"""
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1]
+        if ext.isalnum() and len(ext) <= 8:
+            return ext.lower()
+    if mime_type and "/" in mime_type:
+        sub = mime_type.split("/", 1)[1].split("+", 1)[0]
+        if sub.isalnum():
+            return sub.lower()
+    return "bin"
+
+
+# ==============================================================================
+# Calendar payload (RFC 5545 VEVENT) — hand-rolled reader for the invite
+# subset. Deterministic only: a sender who didn't embed text/calendar or an
+# .ics attachment yields nothing here, ever (email-event-to-calendar outcome).
+# ==============================================================================
+
+
+_PARTSTAT_TO_STATUS = {
+    "NEEDS-ACTION": "pending",
+    "ACCEPTED": "accepted",
+    "DECLINED": "declined",
+    "TENTATIVE": "tentative",
+    "DELEGATED": "delegated",
+}
+
+
+def _strip_mailto(value):
+    return re.sub(r"(?i)^mailto:", "", value or "").strip()
+
+
+def _unfold_ical(text):
+    """Unfold RFC 5545 line continuations — a line starting with a space
+    or tab is a continuation of the previous line."""
+    unfolded = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if line.startswith((" ", "\t")) and unfolded:
+            unfolded[-1] += line[1:]
+        elif line:
+            unfolded.append(line)
+    return unfolded
+
+
+def _ical_unescape(value):
+    """Unescape RFC 5545 TEXT value escaping (\\\\, \\; \\n)."""
+    return (value.replace("\\n", "\n").replace("\\N", "\n")
+                 .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\"))
+
+
+def _parse_ical_line(line):
+    """Split 'NAME;PARAM=VAL;...:VALUE' into (name, params_dict, value)."""
+    name_part, _, value = line.partition(":")
+    segments = name_part.split(";")
+    params = {}
+    for seg in segments[1:]:
+        key, _, val = seg.partition("=")
+        params[key.upper()] = val
+    return segments[0].upper(), params, value
+
+
+def _ical_datetime(value, params):
+    """RFC 5545 DATE-TIME/DATE value -> (iso_string, timezone, all_day)."""
+    if len(value) == 8:  # YYYYMMDD — all-day
+        return f"{value[0:4]}-{value[4:6]}-{value[6:8]}", None, True
+    date_part, time_part = value[:8], value[9:]
+    iso = (f"{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}T"
+           f"{time_part[0:2]}:{time_part[2:4]}:{time_part[4:6]}")
+    if value.endswith("Z"):
+        return iso, "UTC", False
+    return iso, params.get("TZID"), False
+
+
+def _parse_vevent(ical_text, self_email):
+    """Read the invite subset of a VCALENDAR/VEVENT: identity, when/where,
+    organizer, and — the whole point — the self attendee's PARTSTAT."""
+    method = None
+    vevent = {}
+    attendees = []
+    in_event = False
+    for line in _unfold_ical(ical_text):
+        name, params, value = _parse_ical_line(line)
+        if name == "METHOD":
+            method = value.upper()
+        elif name == "BEGIN" and value == "VEVENT":
+            in_event = True
+        elif name == "END" and value == "VEVENT":
+            break
+        elif not in_event:
+            continue
+        elif name == "UID":
+            vevent["uid"] = value
+        elif name == "SUMMARY":
+            vevent["summary"] = _ical_unescape(value)
+        elif name == "DESCRIPTION":
+            vevent["description"] = _ical_unescape(value)
+        elif name == "LOCATION":
+            vevent["location"] = _ical_unescape(value)
+        elif name == "STATUS":
+            vevent["status"] = value.lower()
+        elif name == "DTSTART":
+            vevent["start"], vevent["tz"], vevent["all_day"] = _ical_datetime(value, params)
+        elif name == "DTEND":
+            vevent["end"], _, _ = _ical_datetime(value, params)
+        elif name == "ORGANIZER":
+            vevent["organizer_email"] = _strip_mailto(value)
+            vevent["organizer_name"] = params.get("CN")
+        elif name == "ATTENDEE":
+            attendees.append({"email": _strip_mailto(value), "partstat": params.get("PARTSTAT")})
+        elif name == "X-GOOGLE-CONFERENCE":
+            vevent["conference_url"] = value
+
+    if "uid" not in vevent or "start" not in vevent:
+        return None
+    vevent["method"] = method
+    self_attendee = next(
+        (a for a in attendees if self_email and a["email"].lower() == self_email.lower()), None,
+    )
+    vevent["self_partstat"] = self_attendee["partstat"] if self_attendee else None
+    return vevent
+
+
+async def _parse_calendar_parts(payload, *, message_id, self_email, **params):
+    """Find a text/calendar VEVENT — inline part or .ics attachment — and
+    decode it into a `meeting` dict (+ `invitation` when METHOD:REQUEST).
+    Returns None for markup-less mail — never a guessed event."""
+    if not payload:
+        return None
+
+    candidates = []
+
+    def _walk(part):
+        mime = part.get("mimeType", "")
+        filename = (part.get("filename") or "")
+        if mime == "text/calendar" or filename.lower().endswith(".ics"):
+            candidates.append(part.get("body") or {})
+        for sub in part.get("parts") or []:
+            _walk(sub)
+
+    _walk(payload)
+
+    ical_bytes = None
+    for body in candidates:
+        data = body.get("data")
+        if not data:
+            attachment_id = body.get("attachmentId")
+            if attachment_id:
+                attachment = await get_attachment(message_id=message_id, attachment_id=attachment_id, **params)
+                data = (attachment or {}).get("content")
+        if data:
+            padded = data + "=" * ((4 - len(data) % 4) % 4)
+            ical_bytes = base64.urlsafe_b64decode(padded)
+            break
+
+    if not ical_bytes:
+        return None
+
+    vevent = _parse_vevent(ical_bytes.decode("utf-8", errors="replace"), self_email)
+    if not vevent:
+        return None
+
+    conference_url = vevent.get("conference_url")
+    location = vevent.get("location")
+    virtual_url = conference_url or (location if location and location.lower().startswith("http") else None)
+
+    meeting = {
+        "shape": "meeting",
+        "id": vevent["uid"],
+        "name": vevent.get("summary") or "(No title)",
+        "content": vevent.get("description"),
+        "startDate": vevent["start"],
+        "endDate": vevent.get("end"),
+        "timezone": vevent.get("tz"),
+        "allDay": vevent.get("all_day", False),
+        "status": vevent.get("status"),
+        "icalUid": vevent["uid"],
+        "isVirtual": bool(virtual_url),
+        "meetingUrl": virtual_url,
+        "email": self_email,  # the mailbox this arrived via — disambiguates which Google Calendar account "Add to Calendar" files under
+        "organized_by": {
+            "shape": "person",
+            "name": vevent.get("organizer_name") or vevent.get("organizer_email"),
+            "handle": vevent.get("organizer_email"),
+        } if vevent.get("organizer_email") else None,
+    }
+    if location and not virtual_url:
+        meeting["held_at"] = {"shape": "place", "name": location}
+
+    if vevent.get("method") != "REQUEST":
+        return meeting
+
+    invitation = {
+        "shape": "invitation",
+        "id": vevent["uid"],
+        "name": meeting["name"],
+        "startDate": meeting["startDate"],
+        "endDate": meeting.get("endDate"),
+        "icalUid": vevent["uid"],
+        "invitationType": "event",
+        "email": self_email,
+        "status": _PARTSTAT_TO_STATUS.get(vevent.get("self_partstat"), vevent.get("self_partstat")),
+    }
+    return [meeting, invitation]
+
+
 def _extract_domain(email_addr):
     """Extract domain from an email address."""
     if not email_addr or "@" not in email_addr:
@@ -269,17 +479,16 @@ def _domains_from_accounts(accounts):
 
 
 def _internaldate_to_iso(internal_date):
-    """Convert Gmail internalDate (ms since epoch string) to ISO 8601."""
+    """Convert Gmail internalDate (ms since epoch string) to UTC ISO 8601."""
     if not internal_date:
         return None
     try:
-        ts = int(internal_date) / 1000
-        return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        return iso_from_ms(int(internal_date))
     except (ValueError, TypeError):
         return None
 
 
-def _map_email(msg):
+async def _map_email(msg, **params):
     """Map a Gmail message object to the agentOS email shape."""
     if not msg:
         return msg
@@ -356,7 +565,16 @@ def _map_email(msg):
         body_html = _decode_body_html(payload)
         manage_sub = _extract_manage_subscription_url(body_html)
 
-    return {
+    # Calendar payload (email-event-to-calendar outcome) — deterministic
+    # only: nothing here for markup-less mail, ever.
+    calendar_child = await _parse_calendar_parts(
+        payload,
+        message_id=msg.get("id"),
+        self_email=_get_header(headers, "Delivered-To") or params.get("account"),
+        **params,
+    )
+
+    email = {
         "id": msg.get("id"),
         "name": subject,
         "content": body,
@@ -365,10 +583,9 @@ def _map_email(msg):
         "published": _internaldate_to_iso(msg.get("internalDate")),
         "isStarred": "STARRED" in label_ids,
         "isUnread": "UNREAD" in label_ids,
-        "isDraft": "DRAFT" in label_ids,
-        "isSent": "SENT" in label_ids,
-        "isTrash": "TRASH" in label_ids,
-        "isSpam": "SPAM" in label_ids,
+        # Folder membership (INBOX/TRASH/SPAM/SENT/DRAFT) is NOT stamped as a
+        # flag — it's the read scope, recorded as `mailbox` mirror-list
+        # membership. `labelIds` below keeps the raw labels as provenance.
         "isAutomated": is_automated,
         "hasAttachments": len(attachments) > 0,
         "messageId": _get_header(headers, "Message-ID") or "",
@@ -399,9 +616,15 @@ def _map_email(msg):
         "toDomain": _domains_from_accounts(to_accounts),
         "ccDomain": _domains_from_accounts(cc_accounts),
     }
+    if calendar_child:
+        # email —regards→ meeting (+ invitation when it's a real invite).
+        # Not "references": email.yaml's `references` field is already the
+        # RFC 2822 References header — same key would collide.
+        email["regards"] = calendar_child
+    return email
 
 
-def _map_conversation(thread):
+async def _map_conversation(thread, **params):
     """Map a Gmail thread object to the agentOS conversation shape."""
     if not thread:
         return thread
@@ -422,7 +645,10 @@ def _map_conversation(thread):
         date_published = _internaldate_to_iso(raw_messages[-1].get("internalDate"))
 
     # Map messages through _map_email and extract unique participants
-    mapped_messages = [_map_email(m) for m in raw_messages] if raw_messages else []
+    mapped_messages = (
+        list(await asyncio.gather(*(_map_email(m, **params) for m in raw_messages)))
+        if raw_messages else []
+    )
     participants = _extract_participants(mapped_messages)
 
     # Unread if any message is unread
@@ -465,15 +691,100 @@ def _extract_participants(mapped_emails):
     return participants
 
 
+async def _resolve_attachments(attachments):
+    """Resolve outbound attachment refs → [(filename, mime_type, raw_bytes)].
+
+    Two ref shapes, one contract — because the web shell can't reach the blob
+    store directly (only a worker can), a fresh local file rides up as bytes
+    through the send verb, while a file already ON the graph rides as a path:
+
+      - `{path}`     — a file already in the blob store (an inbound attachment
+                       hydrated by `get_attachment`, or any graph file). We
+                       read the bytes engine-side via `blobs.get` — no
+                       re-upload, dedup for free.
+      - `{content}`  — base64 bytes the compose UI just read off a picked/
+                       dropped/pasted file (the shell has no blob-store reach,
+                       so the bytes come through the verb, mirroring
+                       `message_send_media`).
+
+    A ref carrying neither is skipped, never guessed. `path` wins when both are
+    present (the stored bytes are canonical)."""
+    resolved = []
+    for att in attachments or []:
+        filename = att.get("filename") or att.get("name") or "attachment"
+        mime_type = att.get("mimeType") or "application/octet-stream"
+        path = att.get("path")
+        content = att.get("content")
+        if path:
+            raw = base64.b64decode((await blobs.get(path=path))["data"])
+        elif content:
+            raw = base64.b64decode(content)
+        else:
+            continue
+        resolved.append((filename, mime_type, raw))
+    return resolved
+
+
+async def _stage_attachments(attachments):
+    """Like `_resolve_attachments`, but also PERSISTS every `content` (base64)
+    ref into the blob store, returning both the byte tuples `_build_raw` needs
+    AND the resulting path-refs.
+
+    Only the DRAFT autosave path uses this. A compose window autosaves every
+    ~1.5s; without staging it would re-ship the full base64 bytes over the
+    shell→engine verb on every save. By storing the bytes once and echoing the
+    `path`, the UI swaps its `content` ref for the `path` after the first save,
+    so every later autosave carries a tiny path — the bytes never cross the
+    wire twice. `path` refs pass through untouched (already stored)."""
+    resolved = []  # [(filename, mime_type, raw_bytes)] for _build_raw
+    refs = []      # [{filename, mimeType, path}] echoed back to the compose UI
+    for att in attachments or []:
+        filename = att.get("filename") or att.get("name") or "attachment"
+        mime_type = att.get("mimeType") or "application/octet-stream"
+        path = att.get("path")
+        content = att.get("content")
+        if path:
+            raw = base64.b64decode((await blobs.get(path=path))["data"])
+        elif content:
+            raw = base64.b64decode(content)
+            path = (await blobs.put(
+                data=content, ext=_attachment_ext(filename, mime_type),
+            ))["path"]
+        else:
+            continue
+        resolved.append((filename, mime_type, raw))
+        refs.append({"filename": filename, "mimeType": mime_type, "path": path})
+    return resolved, refs
+
+
 def _build_raw(to, subject, body_text, html_body=None, cc=None, bcc=None,
-               in_reply_to=None, references=None, thread_id=None):
-    """Build a base64url-encoded RFC 2822 message for the Gmail API 'raw' field."""
+               in_reply_to=None, references=None, thread_id=None, attachments=None):
+    """Build a base64url-encoded RFC 2822 message for the Gmail API 'raw' field.
+
+    `attachments` is the already-resolved list from `_resolve_attachments`
+    ([(filename, mime_type, raw_bytes)]). With attachments the message is a
+    `multipart/mixed` whose first part is the body (itself a
+    `multipart/alternative` when HTML is present); without, the body IS the
+    message — byte-identical to the pre-attachment build."""
     if html_body:
-        msg = MIMEMultipart("alternative")
-        msg.attach(MIMEText(body_text or "", "plain", "utf-8"))
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
+        body_part = MIMEMultipart("alternative")
+        body_part.attach(MIMEText(body_text or "", "plain", "utf-8"))
+        body_part.attach(MIMEText(html_body, "html", "utf-8"))
     else:
-        msg = MIMEText(body_text or "", "plain", "utf-8")
+        body_part = MIMEText(body_text or "", "plain", "utf-8")
+
+    if attachments:
+        msg = MIMEMultipart("mixed")
+        msg.attach(body_part)
+        for filename, mime_type, raw in attachments:
+            maintype, _, subtype = (mime_type or "application/octet-stream").partition("/")
+            part = MIMEBase(maintype or "application", subtype or "octet-stream")
+            part.set_payload(raw)
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=filename)
+            msg.attach(part)
+    else:
+        msg = body_part
 
     msg["To"] = to
     msg["Subject"] = subject
@@ -498,7 +809,8 @@ def _build_raw(to, subject, body_text, html_body=None, cc=None, bcc=None,
 @returns("email[]")
 @connection("gmail")
 @timeout(60)
-async def list_email_stubs(*, query="", limit=20, label_ids=None, page_token=None, **params):
+async def list_email_stubs(*, query="", limit=20, label_ids=None, page_token=None,
+                           include_spam_trash=False, **params):
     """List email IDs/stubs only — no full message content."""
     headers = _auth_header(params)
     query_params = {"maxResults": str(limit)}
@@ -506,6 +818,8 @@ async def list_email_stubs(*, query="", limit=20, label_ids=None, page_token=Non
         query_params["q"] = query
     if label_ids:
         query_params["labelIds"] = label_ids
+    if include_spam_trash:
+        query_params["includeSpamTrash"] = "true"
     if page_token:
         query_params["pageToken"] = page_token
 
@@ -514,7 +828,7 @@ async def list_email_stubs(*, query="", limit=20, label_ids=None, page_token=Non
 
 
 @returns("email")
-@provides(web_read, urls=["mail.google.com/*"])
+@provides("web_fetch", urls=["mail.google.com/*"])
 @connection("gmail")
 async def get_email(*, id=None, url=None, **params):
     """Get a specific email with full body content, headers, and attachment metadata."""
@@ -526,19 +840,135 @@ async def get_email(*, id=None, url=None, **params):
 
     headers = _auth_header(params)
     resp = await client.get(f"{BASE_URL}/messages/{id}", params={"format": "full"}, headers=headers)
-    return _map_email(resp["json"])
+    email = await _map_email(resp["json"], **params)
+    account = params.get("account")
+    if account and email and not email.get("accountEmail"):
+        email["accountEmail"] = account
+    return email
+
+
+def _stamp_account(emails, params):
+    """Stamp accountEmail — the mailbox a message arrived on — from the
+    account this call ran as. Delivered-To is a header (absent on lists,
+    an alias on forwards); the authenticated account is the truth."""
+    account = params.get("account")
+    if not account:
+        return emails
+    for e in emails:
+        if e and not e.get("accountEmail"):
+            e["accountEmail"] = account
+    return emails
+
+
+# The mailbox service's folder vocabulary → Gmail search queries. Queries,
+# not labelIds: a list-valued query param doesn't survive the HTTP client's
+# serialization, and `archive` has no label anyway (it is All Mail minus
+# every labeled place). Trash/spam additionally need includeSpamTrash —
+# messages.list silently excludes both by default, whatever the query says.
+_MAILBOX_QUERIES = {"inbox": "in:inbox", "sent": "in:sent", "drafts": "in:drafts",
+                    "trash": "in:trash", "spam": "in:spam",
+                    "archive": "-in:inbox -in:sent -in:drafts -in:trash -in:spam"}
+
+
+def _gmail_date(v):
+    """A date predicate value (ISO date or datetime) → Gmail's YYYY/MM/DD."""
+    return str(v)[:10].replace("-", "/")
+
+
+def _gmail_predicate(f):
+    """One structured predicate `{key, op, value}` → a Gmail search operator.
+    The provider-agnostic field vocabulary (searchQuery.ts) mapped to native
+    Gmail syntax. Booleans carry value "true"/"false"; size values are bytes
+    (Gmail accepts a raw byte count for larger:/smaller:)."""
+    key, op = f.get("key"), f.get("op")
+    v = str(f.get("value", "")).strip()
+    if not key:
+        return ""
+    if key == "from":
+        return f"from:({v})" if v else ""
+    if key == "to":
+        return f"to:({v})" if v else ""
+    if key == "subject":
+        return f"subject:({v})" if v else ""
+    if key == "hasAttachment":
+        return "has:attachment" if v.lower() == "true" else "-has:attachment"
+    if key == "isUnread":
+        return "is:unread" if v.lower() == "true" else "is:read"
+    if key == "isStarred":
+        return "is:starred" if v.lower() == "true" else "-is:starred"
+    if key == "date":
+        if not v:
+            return ""
+        return f"after:{_gmail_date(v)}" if op == "gte" else f"before:{_gmail_date(v)}"
+    if key == "size":
+        if not v:
+            return ""
+        return f"larger:{v}" if op == "gte" else f"smaller:{v}"
+    return ""
+
+
+def _build_search_query(search, mailbox):
+    """Translate the provider-agnostic `search` object (free text + typed
+    predicates + trash/spam inclusion) plus the folder `mailbox` into one
+    Gmail `q=` string. Returns (query, include_spam_trash). This is the Gmail
+    half of the two-way grammar — the graph mirror evaluates the SAME
+    predicates via `filter_by_vals` when a provider is offline."""
+    parts = []
+    include_st = False
+    include_trash = bool(search.get("includeTrash")) if search else False
+    include_spam = bool(search.get("includeSpam")) if search else False
+
+    if mailbox and mailbox != "all":
+        folder_q = _MAILBOX_QUERIES.get(mailbox, "")
+        if folder_q:
+            parts.append(folder_q)
+        if mailbox in ("trash", "spam"):
+            include_st = True
+    else:
+        # Across folders — Gmail excludes trash+spam by default; honor toggles.
+        if include_trash and include_spam:
+            include_st = True
+        elif include_trash:
+            parts.append("-in:spam")
+            include_st = True
+        elif include_spam:
+            parts.append("-in:trash")
+            include_st = True
+
+    if search:
+        text = str(search.get("text") or "").strip()
+        if text:
+            parts.append(text)
+        for f in search.get("filters", []) or []:
+            frag = _gmail_predicate(f)
+            if frag:
+                parts.append(frag)
+    return " ".join(parts).strip(), include_st
 
 
 @returns("email[]")
+@provides("mailbox", account_param="account", search=["text", "from", "to", "subject", "hasAttachment", "isUnread", "isStarred", "date", "size"])
 @connection("gmail")
 @timeout(120)
-async def list_emails(*, query="", limit=20, label_ids=None, page_token=None, **params):
-    """List emails with full content — fetches stubs then hydrates each via get_email."""
-    stubs = await list_email_stubs(query=query, limit=limit, label_ids=label_ids,
+async def list_emails(*, query="", limit=20, label_ids=None, mailbox=None,
+                      search=None, page_token=None, **params):
+    """List emails with full content — fetches stubs then hydrates each via get_email.
+
+    `mailbox` is the service-level folder filter (inbox · sent · drafts ·
+    trash · spam · archive) — provider-agnostic vocabulary shared with the
+    other mailbox providers. `search` is the structured mail-search object
+    the mail UI sends (free text + typed predicates); both are translated to
+    Gmail `q=` operators here. An explicit raw `query` (Gmail syntax) is
+    ANDed on top for agent power-use; `label_ids` wins independently."""
+    folder_q, include_spam_trash = _build_search_query(search, mailbox)
+    q = " ".join(p for p in (str(query).strip(), folder_q) if p).strip()
+    stubs = await list_email_stubs(query=q, limit=limit, label_ids=label_ids,
+                                   include_spam_trash=include_spam_trash,
                                    page_token=page_token, **params)
     if not stubs:
         return []
-    return [await get_email(id=s["id"], **params) for s in stubs]
+    emails = await asyncio.gather(*(get_email(id=s["id"], **params) for s in stubs))
+    return _stamp_account(list(emails), params)
 
 
 @returns("email[]")
@@ -549,7 +979,8 @@ async def search_emails(*, query, limit=20, **params):
     stubs = await list_email_stubs(query=query, limit=limit, **params)
     if not stubs:
         return []
-    return [await get_email(id=s["id"], **params) for s in stubs]
+    emails = await asyncio.gather(*(get_email(id=s["id"], **params) for s in stubs))
+    return _stamp_account(list(emails), params)
 
 
 @returns("conversation[]")
@@ -569,7 +1000,7 @@ async def list_conversations(*, query="", label_ids=None, limit=20, page_token=N
     resp = await client.get(f"{BASE_URL}/threads", params=query_params, headers=headers)
     threads = resp["json"].get("threads", [])
     # Threads from list API only have id/snippet/historyId — map what's available
-    return [_map_conversation(t) for t in threads]
+    return list(await asyncio.gather(*(_map_conversation(t, **params) for t in threads)))
 
 
 @returns("conversation")
@@ -578,7 +1009,7 @@ async def get_conversation(*, id, **params):
     """Get a full email thread with all messages, headers, and body content."""
     headers = _auth_header(params)
     resp = await client.get(f"{BASE_URL}/threads/{id}", params={"format": "full"}, headers=headers)
-    return _map_conversation(resp["json"])
+    return await _map_conversation(resp["json"], **params)
 
 
 @returns({"emailAddress": "string", "messagesTotal": "integer", "threadsTotal": "integer", "historyId": "string"})
@@ -613,19 +1044,34 @@ async def list_labels(**params):
 
 @returns("file")
 @connection("gmail")
-async def get_attachment(*, message_id, attachment_id, **params):
-    """Download an email attachment as a file with base64url-encoded content."""
+async def get_attachment(*, message_id, attachment_id, filename=None, mime_type=None, **params):
+    """Download an email attachment and hydrate it into the blob store.
+
+    Gmail serves attachment bytes base64url-encoded; we decode and hand them
+    to `blobs.put`, so the attachment lands in the content-addressed store
+    like any other file. The returned `file` carries its blob `path` — the one
+    byte home every consumer shares: the reading pane saves it to disk, and a
+    reply re-attaches it (`_resolve_attachments` reads the same path). Pass
+    `filename`/`mime_type` (the caller has them from the email's attachment
+    metadata) so the stored blob and the returned file are honestly typed."""
     headers = _auth_header(params)
     resp = await client.get(
         f"{BASE_URL}/messages/{message_id}/attachments/{attachment_id}", headers=headers,
     )
-    data = resp["json"]
+    b64url = resp["json"].get("data", "")
+    raw = base64.urlsafe_b64decode(b64url + "=" * (-len(b64url) % 4))
+    blob = await blobs.put(
+        data=base64.b64encode(raw).decode(),
+        ext=_attachment_ext(filename, mime_type),
+    )
     return {
         "id": attachment_id,
-        "name": attachment_id,
-        "content": data.get("data", ""),
-        "size": data.get("size"),
-        "encoding": "base64url",
+        "name": filename or attachment_id,
+        "filename": filename,
+        "mimeType": mime_type,
+        "path": blob["path"],
+        "sha": blob["sha256"],
+        "size": blob.get("size") or len(raw),
     }
 
 
@@ -691,7 +1137,7 @@ async def get_draft(*, id, **params):
     headers = _auth_header(params)
     resp = await client.get(f"{BASE_URL}/drafts/{id}", params={"format": "full"}, headers=headers)
     draft = resp["json"]
-    email = _map_email(draft.get("message", {}))
+    email = await _map_email(draft.get("message", {}), **params)
     if email:
         email["draftId"] = draft.get("id")
     return email
@@ -771,48 +1217,62 @@ async def unsubscribe_email(*, id, **params):
 
 
 @returns("email")
+@provides("email_send", account_param="account")
 @connection("gmail")
-async def send_email(*, to, subject, body, html_body=None, cc=None, bcc=None, **params):
+async def send_email(*, to, subject, body, html_body=None, cc=None, bcc=None,
+                     attachments=None, **params):
     """Send a new email (plain text or HTML)."""
-    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc)
+    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc,
+                     attachments=await _resolve_attachments(attachments))
     headers = _auth_header(params)
     resp = await client.post(
         f"{BASE_URL}/messages/send",
         json={"raw": raw}, headers=headers,
     )
-    return _map_email(resp["json"])
+    return _stamp_account([await _map_email(resp["json"], **params)], params)[0]
 
 
 @returns("email")
+@provides("email_reply", account_param="account")
 @connection("gmail")
-async def reply_email(*, to, thread_id, in_reply_to, subject, body, html_body=None,
-                cc=None, bcc=None, references=None, **params):
-    """Reply to an email (stays in the same thread)."""
+async def reply_email(*, to, in_reply_to, subject, body, thread_id=None, html_body=None,
+                cc=None, bcc=None, references=None, attachments=None, **params):
+    """Reply to an email (stays in the same thread).
+
+    `thread_id` is Gmail's own thread key — pass it when the original was
+    read via Gmail. A reply to mail read elsewhere (Mimestream, another
+    provider) has no Gmail threadId; the RFC 2822 In-Reply-To/References
+    headers carry the threading on their own."""
     raw = _build_raw(
         to, subject, body,
         html_body=html_body, cc=cc, bcc=bcc,
         in_reply_to=in_reply_to, references=references,
+        attachments=await _resolve_attachments(attachments),
     )
     headers = _auth_header(params)
+    payload = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
     resp = await client.post(
         f"{BASE_URL}/messages/send",
-        json={"raw": raw, "threadId": thread_id}, headers=headers,
+        json=payload, headers=headers,
     )
-    return _map_email(resp["json"])
+    return _stamp_account([await _map_email(resp["json"], **params)], params)[0]
 
 
 @returns("email")
 @connection("gmail")
 async def forward_email(*, to, subject, body, html_body=None, cc=None, bcc=None,
-                  thread_id=None, **params):
+                  thread_id=None, attachments=None, **params):
     """Forward an email."""
-    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc)
+    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc,
+                     attachments=await _resolve_attachments(attachments))
     headers = _auth_header(params)
     payload = {"raw": raw}
     if thread_id:
         payload["threadId"] = thread_id
     resp = await client.post(f"{BASE_URL}/messages/send", json=payload, headers=headers)
-    return _map_email(resp["json"])
+    return await _map_email(resp["json"], **params)
 
 
 @returns("email")
@@ -825,16 +1285,28 @@ async def modify_email(*, id, add_labels=None, remove_labels=None, **params):
         "removeLabelIds": remove_labels or [],
     }
     resp = await client.post(f"{BASE_URL}/messages/{id}/modify", json=body, headers=headers)
-    return _map_email(resp["json"])
+    return await _map_email(resp["json"], **params)
 
 
 @returns("email")
+@provides("email_archive", account_param="account")
+@connection("gmail")
+async def archive_email(*, id, **params):
+    """Archive an email — drop it from the inbox; it keeps living in All Mail."""
+    headers = _auth_header(params)
+    body = {"addLabelIds": [], "removeLabelIds": ["INBOX"]}
+    resp = await client.post(f"{BASE_URL}/messages/{id}/modify", json=body, headers=headers)
+    return _stamp_account([await _map_email(resp["json"], **params)], params)[0]
+
+
+@returns("email")
+@provides("email_trash", account_param="account")
 @connection("gmail")
 async def trash_email(*, id, **params):
     """Move an email to trash."""
     headers = _auth_header(params)
     resp = await client.post(f"{BASE_URL}/messages/{id}/trash", headers=headers)
-    return _map_email(resp["json"])
+    return _stamp_account([await _map_email(resp["json"], **params)], params)[0]
 
 
 @returns("email")
@@ -843,7 +1315,7 @@ async def untrash_email(*, id, **params):
     """Remove an email from trash."""
     headers = _auth_header(params)
     resp = await client.post(f"{BASE_URL}/messages/{id}/untrash", headers=headers)
-    return _map_email(resp["json"])
+    return await _map_email(resp["json"], **params)
 
 
 @returns({"ok": "boolean"})
@@ -876,9 +1348,10 @@ async def batch_delete_email(*, ids, **params):
 @returns("email")
 @connection("gmail")
 async def create_draft(*, to, subject, body, html_body=None, cc=None, bcc=None,
-                 thread_id=None, **params):
+                 thread_id=None, attachments=None, **params):
     """Create a new draft email."""
-    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc)
+    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc,
+                     attachments=await _resolve_attachments(attachments))
     headers = _auth_header(params)
     message = {"raw": raw}
     if thread_id:
@@ -888,7 +1361,7 @@ async def create_draft(*, to, subject, body, html_body=None, cc=None, bcc=None,
         json={"message": message}, headers=headers,
     )
     draft = resp["json"]
-    email = _map_email(draft.get("message", {}))
+    email = await _map_email(draft.get("message", {}), **params)
     if email:
         email["draftId"] = draft.get("id")
     return email
@@ -896,18 +1369,62 @@ async def create_draft(*, to, subject, body, html_body=None, cc=None, bcc=None,
 
 @returns("email")
 @connection("gmail")
-async def update_draft(*, id, to, subject, body, html_body=None, cc=None, bcc=None, **params):
+async def update_draft(*, id, to, subject, body, html_body=None, cc=None, bcc=None,
+                       attachments=None, **params):
     """Update an existing draft."""
-    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc)
+    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc,
+                     attachments=await _resolve_attachments(attachments))
     headers = _auth_header(params)
     resp = await client.put(
         f"{BASE_URL}/drafts/{id}",
         json={"message": {"raw": raw}}, headers=headers,
     )
     draft = resp["json"]
-    email = _map_email(draft.get("message", {}))
+    email = await _map_email(draft.get("message", {}), **params)
     if email:
         email["draftId"] = draft.get("id")
+    return email
+
+
+@returns("email")
+@provides("email_draft", account_param="account")
+@connection("gmail")
+async def save_draft(*, to="", subject="", body="", html_body=None, cc=None, bcc=None,
+                     draft_id=None, in_reply_to=None, thread_id=None, attachments=None, **params):
+    """Save a draft to the account's Drafts folder — the brokered `email_draft`.
+
+    Create when `draft_id` is absent, UPDATE in place when present: a compose
+    window's autosave calls this repeatedly with the id it got back, so one
+    compose session is ONE draft, never a pile of duplicates. Carries HTML
+    (`html_body`) and reply threading (`in_reply_to`) into the raw MIME.
+    Returns the `email` with its provider `draftId` stamped, plus the staged
+    `attachments` (path-refs): the autosave persists any picked bytes ONCE and
+    echoes the paths back, so the compose UI swaps `content`→`path` and later
+    saves never re-ship the bytes."""
+    resolved, refs = await _stage_attachments(attachments)
+    raw = _build_raw(to, subject, body, html_body=html_body, cc=cc, bcc=bcc,
+                     in_reply_to=in_reply_to, references=in_reply_to,
+                     attachments=resolved)
+    headers = _auth_header(params)
+    if draft_id:
+        resp = await client.put(
+            f"{BASE_URL}/drafts/{draft_id}",
+            json={"message": {"raw": raw}}, headers=headers,
+        )
+    else:
+        message = {"raw": raw}
+        if thread_id:
+            message["threadId"] = thread_id
+        resp = await client.post(
+            f"{BASE_URL}/drafts",
+            json={"message": message}, headers=headers,
+        )
+    draft = resp["json"]
+    email = await _map_email(draft.get("message", {}), **params)
+    if email:
+        email["draftId"] = draft.get("id")
+        if refs:
+            email["attachments"] = refs
     return email
 
 
@@ -920,7 +1437,7 @@ async def send_draft(*, id, **params):
         f"{BASE_URL}/drafts/send",
         json={"id": id}, headers=headers,
     )
-    return _map_email(resp["json"])
+    return await _map_email(resp["json"], **params)
 
 
 @returns({"status": "string"})

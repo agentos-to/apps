@@ -37,6 +37,7 @@ from agentos import (
     app_error,
     app_secret,
     test,
+    canonicalize_datetime,
 )
 
 connection("public",
@@ -465,6 +466,13 @@ def _provider_timezone(*objs: dict | None) -> str | None:
     return None
 
 
+def _instant(value: str | None) -> str | None:
+    """Outbound datetime → UTC ``…Z`` (Tilefive is usually already Z)."""
+    if not value:
+        return None
+    return canonicalize_datetime(str(value))
+
+
 def _day_window_utc(
     date_str: str | None,
     days: int,
@@ -664,7 +672,7 @@ def _performer_for_booking(b: dict, event: dict) -> dict | None:
 
     Prefer Tilefive `staff` / `staffHasBooking` when populated; otherwise
     parse the `w/` suffix from the class title. Instructor *photos* are
-    not on `/cal` today (staff arrays arrive empty) — see requirements.md.
+    not on `/cal` today (staff arrays arrive empty) — see dev/requirements.md.
     """
     for row in (b.get("staff") or []) + (b.get("staffHasBooking") or []) + (event.get("staff") or []):
         person = _staff_person(row if isinstance(row, dict) else {})
@@ -724,8 +732,8 @@ def _booking_to_entity(b: dict) -> dict:
         "name": b["name"],
         "content": " — ".join(desc),
         "description": _strip_html(b.get("description") or event.get("description")),
-        "startDate": b.get("startDT"),
-        "endDate": b.get("endDT"),
+        "startDate": _instant(b.get("startDT")),
+        "endDate": _instant(b.get("endDT")),
         "timezone": tz,
         "activityType": activity_name,
         "capacity": capacity,
@@ -776,8 +784,8 @@ def _class_stub_from_booking(b: dict | None, booking_instance_id: int | None = N
         "shape": "class",
     }
     if name: stub["name"] = name
-    if start: stub["startDate"] = start
-    if end: stub["endDate"] = end
+    if start: stub["startDate"] = _instant(start)
+    if end: stub["endDate"] = _instant(end)
     if tz: stub["timezone"] = tz
     return stub
 
@@ -817,10 +825,10 @@ def _reservation_from_portal(
         "status": norm_status,
         "bookingType": "instant",
         "name": name or f"ABP class reservation {rid}",
-        "startTime": start,
-        "endTime": end,
-        "startDate": start,
-        "endDate": end,
+        "startTime": _instant(start),
+        "endTime": _instant(end),
+        "startDate": _instant(start),
+        "endDate": _instant(end),
         "timezone": timezone_name,
         "availableActions": actions,
         "partySize": party_size if party_size is not None else 1,

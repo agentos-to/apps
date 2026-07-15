@@ -1,0 +1,10 @@
+#!/bin/bash
+# ginspect: browser.inspect (expr or objectId)
+set -euo pipefail
+ARG="${1:?usage: ginspect <expr|objectId>}"
+if [[ "$ARG" =~ ^[0-9]+\. ]]; then
+FULL=$(python3 -c "import json,sys; print(json.dumps({'op':'browser_session','params':{'verb':'inspect','target':'mail.google.com','mode':'background','objectId':sys.argv[1]}}))" "$ARG")
+else
+FULL=$(python3 -c "import json,sys; print(json.dumps({'op':'browser_session','params':{'verb':'inspect','target':'mail.google.com','mode':'background','expr':sys.argv[1]}}))" "$ARG")
+fi
+agentos call services "$FULL"

@@ -47,15 +47,18 @@ on-disk state under `~/.claude/projects/`.
 
 | Tool | Description |
 |---|---|
-| `agent` | Run Claude as an agent via `claude -p`. Full agent loop — tool use + structured output via `--mcp-config` / `--json-schema`. |
+| `chat_cli` | `@provides("chat")` — one `claude -p` completion, no `--mcp-config`. The no-loop twin of `agent`. (`_cli` suffix: `claude_api.chat` owns the flat `chat` name.) |
+| `agent` | `@provides("agent")` — run Claude as a full agent loop via `claude -p`. Tool use + structured output via `--mcp-config` / `--json-schema`. |
 | `list_models_cli` | List Claude models via the keychain OAuth token (no API key). Same endpoint as `list_models`, different auth. |
 | `list_projects` | List every project directory under `~/.claude/projects/` with conversation counts and last activity. |
 | `list_conversations_cli` | List local Claude Code conversations (one per JSONL transcript) as shape-native `conversation[]`. Optional `project` scope, optional `limit`. |
 | `read_conversation_cli` | Read a full conversation transcript — returns one `conversation` with a nested `message[]` relation (content, blocks, author, published, tool calls). |
 
-> **Note:** The `code` connection uses `agent` rather than `chat` because it behaves
-> fundamentally differently from the API — it loops internally over tool calls.
-> Both still `@provides(llm)` so service routing can pick either.
+> **Note:** `claude -p` only ever returns a *final message* — it can't emit the
+> request-style `tool_calls` an SDK loop consumes — so the `code` connection splits
+> by return shape: `chat` `@provides("chat")` (a completion) + `agent`
+> `@provides("agent")` (it loops internally over tool calls). The `api` connection's
+> `chat` also `@provides("chat")`, so service routing picks by model + credentials.
 >
 > The `_cli` suffix on `list_models_cli` / `list_conversations_cli` /
 > `read_conversation_cli` is because app tool names share a flat namespace

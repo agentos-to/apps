@@ -21,7 +21,7 @@ test:
 Turns on-disk health documents into AgentOS health-graph nodes.
 
 `import_lab_report` reads a dated blood-panel file, autodetects its
-format, and returns one `health-observation` per analyte — each wired
+format, and returns one `measure` per analyte — each wired
 to its panel (`fromPanel`), its biomarker definition (`measures`), and
 the source file (`document`). The engine ingests and dedups on
 deterministic ids, so re-importing the same draw reconciles in place

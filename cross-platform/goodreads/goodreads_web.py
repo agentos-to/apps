@@ -20,9 +20,9 @@ from typing import Any
 
 from agentos import (
     account,
+    browser_session,
     claims,
     connection,
-    email_lookup,
     molt,
     normalize_email,
     normalize_handle,
@@ -104,7 +104,8 @@ async def _get(target_url: str) -> dict[str, Any]:
     tab, so the viewer's session cookie rides it; nothing reaches this
     app but the resulting HTML.
     """
-    result = await services.call(services.browser_session, params={
+    result = await services.call("browser_session", verb="eval", params={
+        "mode": "background",  # headless bg profile (rule 19) — never the daily browser
         "target": _TARGET,
         "js": _FETCH_JS % {"url": json.dumps(target_url)},
         "timeout": 30,
@@ -235,6 +236,42 @@ async def check_session(**params) -> dict[str, Any]:
     }
 
 
+@account.login
+@returns("account | auth_challenge")
+@connection("none")
+@timeout(60)
+async def login(**params) -> dict[str, Any]:
+    """Sign in to Goodreads — or report the already-live session.
+
+    Returns the `account` when the engine's background profile already holds a
+    live Goodreads session. Otherwise opens a headed sign-in window on that
+    profile (the `login_window` flip) and returns a `login_window`
+    `auth_challenge`: the human signs in once, the agent polls check_session,
+    and the session persists in the exact profile every headless read (friends,
+    shelves, reviews) uses.
+    """
+    session = await check_session(**params)
+    if isinstance(session, dict) and session.get("authenticated"):
+        return session
+    return await browser_session.login_window(
+        "https://www.goodreads.com/user/sign_in", label="Goodreads"
+    )
+
+
+@account.logout
+@returns({"status": "string", "hint": "string"})
+@connection("none")
+@timeout(30)
+async def logout(**params) -> dict[str, Any]:
+    """Sign out of Goodreads — clears the session from the background profile."""
+    await browser_session.navigate(_TARGET, "https://www.goodreads.com/user/sign_out")
+    return {
+        "status": "logged_out",
+        "hint": "Cleared the Goodreads session in the engine's background "
+                "profile. Re-run login to sign back in.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entry points (called by AgentOS with auto-dispatch kwargs)
 # ---------------------------------------------------------------------------
@@ -362,7 +399,7 @@ async def list_shelf_books(*, user_id: str = "", shelf_name: str = "", page: int
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("person[]")
-@provides(email_lookup)
+@provides("email_lookup")
 @connection("none")
 @timeout(15)
 async def resolve_email(*, email: str = "", **params) -> list[dict[str, Any]]:

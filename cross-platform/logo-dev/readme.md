@@ -29,6 +29,10 @@ Logo.dev is a **CDN** — URLs return images directly, not JSON. The utilities v
 https://img.logo.dev/{identifier}?token=KEY&size=128&format=png
 ```
 
+**`logo_url` two conveniences** (the others — ticker/name/crypto — take a bare identifier):
+- **Pass any URL or host.** `domain` accepts a bare domain (`github.com`), a subdomain host (`mail.google.com`), or a full URL (`https://mail.google.com/inbox`); it's normalized to the registrable apex (`google.com`) so you can hand it an app's website verbatim.
+- **`fallback` defaults to `404`, not monogram.** logo.dev's own default returns a generated letter-tile for a brand it doesn't have — a `200` indistinguishable from a real logo, so "no logo exists" is silently undetectable. `logo_url` defaults `fallback=404`: a missing logo returns HTTP 404, so a consumer (e.g. an icon setter) can honestly skip instead of storing a fake face. Pass `fallback="monogram"` to opt back in.
+
 ## Usage
 
 ### Get logo by domain
@@ -93,7 +97,7 @@ curl -X POST http://localhost:3456/api/adapters/logo-dev/crypto_url \
 | format | jpg, png, webp | png |
 | theme | auto, light, dark | auto |
 | retina | true/false | false |
-| fallback | monogram, 404 | monogram |
+| fallback | monogram, 404 | **404** (`logo_url`); monogram (others) |
 
 ## Pricing
 

@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+JS="${1:?usage: geval '<js body ending in return …>'  (GRE=1 also injects gmail_re.js; FRESH=1 reloads)}"
+TK=/Users/joe/dev/agentos/commons/re/toolkit.js
+GRE_JS=/Users/joe/dev/agentos/commons/plugins/cross-platform/gmail-cdp/dev/gmail_re.js
+PRE=""
+if [ "${FRESH:-}" = 1 ]; then PRE="delete globalThis.__re; delete globalThis.__gre;"; fi
+FULL=$(python3 -c "
+import json,sys
+tk=open(sys.argv[1]).read()
+gre_path=sys.argv[2]
+pre=sys.argv[3]
+body=sys.argv[4]
+use_gre=sys.argv[5]=='1'
+parts=[pre, tk]
+if use_gre:
+    parts.append(open(gre_path).read())
+parts.append(body)
+payload='(async()=>{' + ';'.join(parts) + '})()'
+print(json.dumps({'op':'browser_session','params':{'verb':'eval','target':'mail.google.com','mode':'background','js':payload}}))
+" "$TK" "$GRE_JS" "$PRE" "$JS" "${GRE:-0}")
+agentos call services "$FULL"

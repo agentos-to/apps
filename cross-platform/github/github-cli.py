@@ -3,7 +3,7 @@ import base64
 import json
 import re
 import sys
-from agentos import shell, provides, returns, web_read
+from agentos import shell, provides, returns
 
 
 def _fail(message, code=1):
@@ -92,14 +92,14 @@ def _task_shape(item: dict, repo: str) -> dict:
 
 
 @returns("task")
-@provides(web_read, urls=["github.com/*/issues/*", "github.com/*/pull/*"])
+@provides("web_fetch", urls=["github.com/*/issues/*", "github.com/*/pull/*"])
 async def get_task(*, repo=None, number=None, url=None, **params):
     """Get a single issue by number
 
         Args:
             repo: Repository in owner/name format — optional if url is a GitHub issue or PR link
             number: Issue or PR number — optional if url is set
-            url: GitHub issue or pull request URL (web_read)
+            url: GitHub issue or pull request URL (web_fetch)
         """
     if url:
         parsed = _parse_issue_or_pr_url(url)
@@ -286,7 +286,7 @@ def _parse_blob_or_raw_url(url: str) -> tuple[str, str, str] | None:
 
 
 @returns("file")
-@provides(web_read, urls=["github.com/*/blob/*", "raw.githubusercontent.com/*"])
+@provides("web_fetch", urls=["github.com/*/blob/*", "raw.githubusercontent.com/*"])
 async def read_document(*, repo=None, path=None, ref=None, url=None, **params):
     """Read a text file from a repository
 
@@ -294,7 +294,7 @@ async def read_document(*, repo=None, path=None, ref=None, url=None, **params):
             repo: Repository in owner/name format — optional if url is a blob or raw.githubusercontent.com link
             path: File path within the repository — optional if url is set
             ref: Branch, tag, or commit — optional if url is set
-            url: GitHub blob URL or raw.githubusercontent.com file URL (web_read)
+            url: GitHub blob URL or raw.githubusercontent.com file URL (web_fetch)
         """
     if url:
         parsed = _parse_blob_or_raw_url(url)

@@ -5,7 +5,7 @@ Keychain's internet-password entries as agentOS credential sources.
 Read-only; nothing in this app mutates the Keychain.
 
 The engine's `resolve_login_credentials` pipeline matchmakes
-`@provides(login_credentials)` tools at dispatch time — this app's
+`@provides("login_credentials")` tools at dispatch time — this app's
 `get_credentials` tool is invoked with a target domain, returns either
 `{provided: true, identifier: <email>}` + a `__secrets__` envelope, or
 `{provided: false}` when no entry matches.
@@ -18,9 +18,7 @@ from typing import Any
 
 from agentos import (
     connection,
-    login_credentials,
     normalize_email,
-    password,
     provides,
     returns,
     shell,
@@ -116,7 +114,7 @@ async def _find_entry(host: str, account: str | None) -> tuple[dict[str, str], s
 
 
 @returns("credential")
-@provides(login_credentials, description="Reads {email, password} pairs from the macOS login Keychain")
+@provides("login_credentials", description="Reads {email, password} pairs from the macOS login Keychain")
 @connection("local")
 async def get_credentials(
     *,
@@ -155,7 +153,7 @@ async def get_credentials(
 
 
 @returns({"provided": "boolean", "identifier": "string"})
-@provides(password, description="Reads a password from macOS Keychain given domain + identifier")
+@provides("password", description="Reads a password from macOS Keychain given domain + identifier")
 @connection("local")
 async def get_password(
     *,

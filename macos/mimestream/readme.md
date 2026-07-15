@@ -5,6 +5,8 @@ services:
 - plist
 - secrets
 - sql
+capabilities:
+- full_disk_access
 name: Mimestream
 description: Read and search email from Mimestream, a native macOS email client for
   Gmail
