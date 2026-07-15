@@ -1,75 +1,93 @@
 ---
 id: onepassword
-services:
-  - shell
 name: 1Password
 description: >
-  Credential provider backed by the 1Password CLI (`op`). Exposes
-  Login and API-Credential vault items via
-  `@provides(login_credentials)` and `@provides(api_key)` so apps'
-  `login` tools can pull `{email, password}` or API keys without the
-  user pasting anything.
+  Local 1Password vault connector (B5 sqlite decrypt via AgentOS crypto).
+  Provides login_credentials / api_key for matchmaking, and imports Secure
+  Notes, cards, identities, government IDs, memberships, servers, and
+  software licenses onto the graph as typed shapes.
+services:
+  - sql
+  - crypto
+  - secrets
 color: "#0572EC"
 website: "https://1password.com/"
 ---
 
 # 1Password
 
-Wraps the [1Password CLI](https://developer.1password.com/docs/cli/)
-(`op`) to expose vault items as agentOS credential sources. Read-only
-in P1 — this app never writes to vaults. A future project covers the
-full vault-import scope (credit cards, bank accounts, identity docs as
-graph entities with tokenization).
+**Local-first.** Reads your on-disk `1password.sqlite` directly. No
+`op` CLI, no desktop Integrate IPC, no Python SDK / native dylib.
 
-## Setup
+Crypto primitives run in the AgentOS engine (`crypto.pbkdf2_sha256`,
+`crypto.aes_gcm`, `crypto.rsa_oaep`, `crypto.hkdf`). Unlock material is
+stored per-user in the AgentOS credential store (`op.local`).
 
-Install and sign in:
+## Setup (once per user)
 
-```bash
-brew install --cask 1password-cli
-eval $(op signin)
+Call without a password — AgentOS opens the **AgentOS Security** window
+so you type the Master Password there. The Secret Key is loaded from the
+1Password app on this Mac when possible; agents never see either secret.
+
+```
+setup_local_unlock()
 ```
 
-1Password's CLI talks to the desktop app via a local socket; the first
-`op` call of a session will surface a native biometric / password
-prompt from the desktop app, and subsequent calls are silent for the
-cached session lifetime.
+That returns `{ status: "pending", challengeId, prompt: "secret_challenge" }`.
+After you Unlock in the desktop window, secrets land in `op.local` and
+later tools can unlock the vault.
 
-## Matchmaking
+App-developer reference for this pattern (any plugin, not just 1Password):
+`read({id:"apps-secret-challenges", volume:"system"})` — authored at
+`core/system-docs/apps/secret-challenges.md`.
 
-When an app's `login` tool calls
-`credentials.retrieve(domain=".approach.app", required=["email", "password"])`,
-the engine dispatches this app's `get_credentials` tool with the
-domain. The tool runs `op item list --categories Login --format json`,
-filters by the item's `urls[]` matching the domain, and returns the
-first hit via `__secrets__`.
+Legacy / tests (agent must never be given production secrets this way):
 
-For API keys (`@provides(api_key)`), the tool looks in the
-**API Credential** item category on a service-name match.
+```
+setup_local_unlock(master_password="…", secret_key="A3-…")
+```
 
-## Item-category mapping
+macOS DB path (automatic):
+`~/Library/Group Containers/2BUA8C4S2C.com.1password/Library/Application Support/1Password/Data/1password.sqlite`
 
-| Request | 1Password category | Field shape |
+## Credential providers
+
+| Service | Tool | Returns |
 |---|---|---|
-| `login_credentials` | Login | `{email/username, password}` |
-| `api_key` | API Credential | `{value}` (plus optional `username`, `type`) |
+| `login_credentials` | `get_credentials(domain=)` | `{email,password}` via `__secrets__` |
+| `api_key` | `get_api_key(service=)` | `{key}` via `__secrets__` |
 
-Vault-wide search uses whichever vault the current `op` session is
-pointed at. Multi-account / multi-vault setups can disambiguate by
-passing `params.account` on the original tool call — the engine's
-"Multiple accounts. Specify account." structured error surfaces when
-more than one item matches.
+Used by `credentials.retrieve(...)`. After the first successful pull,
+Vault is tried first on later calls.
 
-## Scope
+## Graph import
 
-**In scope (P1):**
-- Read Login items matching a domain.
-- Read API Credential items matching a service name.
-- Return via `__secrets__` so the LLM never sees raw secret values.
+| Tool | Shape | Deterministic links |
+|---|---|---|
+| `get_login(q=)` | `account` | `for_site → website`; `at → organization` |
+| `get_secure_note(q=)` | `secure_note` | body only in `__secrets__` |
+| `get_credit_card(q=)` | `payment_method` | PCI-safe last4/brand; PAN/CVV in `__secrets__` |
+| `get_identity(q=)` | `person` | identities[] |
+| `get_government_id(q=)` | `government_id` | `held_by → person` |
+| `get_membership(q=)` | `membership` | `at → organization` |
+| `get_server(q=)` | `server` | `about → website` when host looks like FQDN |
+| `get_software_license(q=)` | `software_license` | `licenses → software` |
+| `list_items(category?, q?)` | overview json | titles/urls only |
 
-**Out of scope (later):**
-- Writes (create / update / delete items).
-- Full vault import with credit cards, bank accounts, identity docs as
-  graph entities. See
-  [`core/_roadmap/_specs/skills/1password-integration.md`](../../../core/_roadmap/_specs/skills/1password-integration.md)
-  for that scope.
+Passkeys are **not** supported yet.
+
+## Security
+
+- Never log master password, secret key, passwords, note bodies, PAN/CVV.
+- Unlock secrets: domain `op.local`. Imported item secrets: `op.vault`.
+- Derived vault keys stay in the Python worker for a **30-minute sliding
+  TTL** (re-derived from `op.local` after expiry — no re-prompt while the
+  unlock row exists). Biometric gate on reading `op.local` is planned later.
+
+## Why not Integrate / official MCP / opcli
+
+| Path | Why not |
+|---|---|
+| Desktop Integrate + `op` | Chronically flaky IPC |
+| Labs MCP | Environments only — no vault Login plaintext |
+| Vendored `opcli` | Third-party binary; we own the decrypt instead |

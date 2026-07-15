@@ -8,23 +8,31 @@ The portal is a React SPA built on the **Tilefive** platform (`approach.app`).
 ## Status & What's Next
 
 ### ✅ Done
-- `get_schedule` — fetches live class schedule from `widgets.api.prod.tilefive.com/cal`, fully working from Python and via direct `mcp:call` once the spawn issue below is resolved
-- `login` / `refresh_tokens` — Cognito `USER_PASSWORD_AUTH` flow implemented, awaiting credential test
-- `book_class`, `cancel_booking`, `get_my_memberships`, `get_my_passes` — implemented from bundle analysis
-- `discover_config` — dynamic API key + Cognito config extraction from app bundle with fallback constants
-- `readme.md` app YAML — all operations defined, `auth: none` for public schedule, credential-gated for booking
-- key transport learnings (httpx/http2, JA4 fingerprinting, Sec-Fetch headers) captured in the platform RE docs (`platform/docs/src/content/docs/apps/reverse-engineering/1-transport.md`)
+- `get_schedule` — widgets `/cal`, auto-paged (no silent `pageSize=50` truncate); returns `class[]`
+- `get_locations` — Tilefive `timeZone` → `place.timezone` (no brand-wide Austin constant)
+- `login` / `check_session` / `logout` — Cognito `USER_PASSWORD_AUTH` + `REFRESH_TOKEN_AUTH`; login returns full `account`
+- `book_class` / `cancel_booking` / `get_my_bookings` — emit `reservation` / `reservation[]` with `reservationType: fitness_class`
+- `get_my_memberships` / `get_my_passes` — shape-typed, account + location stubs
+- `discover_config` — dynamic API key + Cognito config from portal bundle
+- Portal connection: `auth.header.Authorization = .auth.idToken` (raw Cognito IdToken)
+- Commons services: `@provides("reservation_availability"|"reservation_get"|"reservation_locations"|"reservation_create"|"reservation_list"|"reservation_cancel")` — ABP maps Tilefive classes onto these; the Reservations app never names `class_*`
+- Class enrichment: `event.imageURL` → `class.image`; instructor via `performer` person (staff when present, else `w/` title parse); `activities` (not legacy `activitys`)
 
-### 🔴 Blocked: MCP spawn error
-`run({ app: "austin-boulder-project", tool: "get_schedule" })` via MCP fails with
-`"Failed to spawn process: No such file or directory"`. Likely cause: `working_dir: .`
-in the YAML command block resolves unexpectedly, or `python3` is not in the engine daemon's PATH.
-Other apps (kitty, granola) use the same pattern — diff against one of those to find the fix.
+### Gap — instructor photo
+Tilefive `/cal` returns `staff: []` / `staffHasBooking: []` on BookingInstance
+rows (verified Jul 2026). Class series photos land on `event.imageURL`
+(Firebase). Activity category avatars land on `activities[].imageURL`.
+There is **no per-instructor headshot** on `/cal` today — we do not fake
+one. When Tilefive starts filling `staff` with `imageURL`, `_staff_person`
+already maps it onto `person.image`.
 
-### 📋 Needs credentials
-- `login(email, password)` — needs a real ABP account to verify Cognito flow end-to-end
-- `book_class` body payload — `{"numGuests": 0}` is our best guess from the bundle; needs one live booking attempt to confirm or correct
-- `get_my_memberships` / `get_my_passes` — need login to test response shape
+### 📋 Needs live credentials
+- `login` via 1Password — local vault unlock (`onepassword.setup_local_unlock` → AgentOS Security), then `credentials.retrieve(".approach.app")` / `plugins.run login` (grant scoped to `login_credentials` / `.approach.app`). No 1Password “Integrate with other apps” toggle.
+- After login: `get_my_memberships`, optionally book if Joe asks
+
+### Notes
+- Earlier MCP spawn / `working_dir` issues are resolved (Python-first plugin load).
+- `days=7` used to silently truncate at 50 bookings; now pages or raises `IncompleteSchedule`.
 
 ---
 
@@ -315,10 +323,17 @@ Authorization: {Cognito IdToken}     ← NOT AccessToken, NOT "Bearer ..."
 Content-Type: application/json
 Origin: https://boulderingproject.portal.approach.app
 
-{ "numGuests": 0 }   ← body TBD — needs live capture to confirm
+{ "customerId": <id>, "numGuests": 0, "membershipId": <id> }
 ```
 
 `bookingInstanceId` = the `id` field from the `/cal` response (e.g. `826115`)
+
+**AgentOS mapping:** schedule discovery stays `@returns("class[]")`
+(`/cal` BookingInstance). `book_class` / `get_my_bookings` /
+`cancel_booking` emit `reservation` with `reservationType:
+"fitness_class"`, `reservationId` = portal reservation id, times +
+`timezone` from the location's Tilefive `timeZone` (via place), and
+`availableActions: ["cancel"]` when confirmed.
 
 ### Authorization: IdToken (not AccessToken)
 
