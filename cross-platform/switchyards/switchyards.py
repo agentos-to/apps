@@ -51,6 +51,10 @@ connection(
     client="browser",
 )
 
+# Member session (venueuser / Skedda login) — browser profile, no vault.
+# Ops bind @connection("none"); domain= is the identity namespace.
+connection("none", domain="skedda.com")
+
 # Graph `at` — stable id so remember upserts one org, not one per place.
 _SY_ORG = {
     "id": "switchyards",

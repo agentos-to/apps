@@ -74,8 +74,11 @@ from agentos import account, app_error, blobs, browser_session, client, connecti
 from agentos.identity import normalize_email
 
 # A browser-driven connector rides no credential — the session is the daily
-# browser profile. All ops bind @connection("none").
-connection("none", base_url="https://mail.google.com/")
+# browser profile. All ops bind @connection("none"). `domain=` is the platform
+# identity namespace for session registration (not the browse target — that
+# stays in browser_session `target=`). Do not use base_url here unless tools
+# call client.* with relative URLs.
+connection("none", domain="google.com")
 
 _TARGET = "mail.google.com"
 

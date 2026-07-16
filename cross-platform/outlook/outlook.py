@@ -641,6 +641,10 @@ async def _eval(body: str, *, wait_ms: int = 30000, timeout_s: int = 45):
 # headless read uses. `check_session` reads identity straight out of OWA's
 # session store; `logout` performs the real MSA sign-out. All three are
 # `@connection("none")` — the session is the browser profile, not a credential.
+#
+# `domain=` is the platform identity namespace for session registration.
+# Browse targets stay in browser_session `target=` — not on this connection.
+connection("none", domain="outlook.com")
 
 _IDENTITY_JS = """
   const id = __owa.identity();
