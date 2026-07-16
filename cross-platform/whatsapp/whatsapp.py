@@ -83,6 +83,23 @@ const { Chat, Msg, Contact } = C;
 # `=== true`.
 _HELPERS = """
 const str = (v) => typeof v === 'string' ? v : '';
+// MsgKey serialization: ~2026-07 Web builds dropped the own `_serialized`
+// data property on message keys (Chat WIDs still have it). The string form
+// still lives on `toString()` — same `false_<remote>_<id>_<participant>`
+// shape Msg.get / Reactions.find / WAWebDBGetReactions expect. Without this,
+// every mapped message id was "" and media hydration + reaction attach both
+// silently no-oped (verified live on Vibe Coders 2026-07-16).
+const keyStr = (k) => {
+  if (!k) return '';
+  if (typeof k === 'string') return k;
+  if (typeof k._serialized === 'string' && k._serialized) return k._serialized;
+  try {
+    const s = typeof k.toString === 'function' ? k.toString() : '';
+    if (s && s !== '[object Object]') return s;
+  } catch (e) {}
+  return '';
+};
+const msgId = (m) => keyStr(m && (m.__x_id || m.id));
 const jidPhone = (jid) => {
   if (!jid) return null;
   const [num, host] = jid.split('@');
@@ -251,10 +268,10 @@ const msgBody = (m) => {
   return body;
 };
 const mapMsg = (m) => {
-  const chatId = m.__x_id?.remote?._serialized || '';
+  const chatId = keyStr(m.__x_id?.remote) || '';
   const isOutgoing = m.__x_id?.fromMe === true;
   const out = {
-    id: m.__x_id?._serialized || '',
+    id: msgId(m),
     content: msgBody(m),
     published: iso(m.__x_t),
     conversationId: chatId,
@@ -275,7 +292,7 @@ const mapMsg = (m) => {
     const sender = m.__x_senderObj;
     const senderName = str(sender?.__x_name) || str(sender?.__x_pushname) || str(m.__x_notifyName) || null;
     if (senderName) out.author = senderName;
-    const senderJid = m.__x_author?._serialized || m.__x_from?._serialized || null;
+    const senderJid = keyStr(m.__x_author) || keyStr(m.__x_from) || null;
     // See mapChat's comment — syncToAddressbook, not __x_name, is the real
     // saved-contact signal. Matters most here: a group's per-message
     // sender is exactly where WhatsApp's own client shows "~Name" for an
@@ -284,6 +301,34 @@ const mapMsg = (m) => {
     if (acct) out.from = acct;
   }
   if (m.__x_star === true) out.isStarred = true;
+  // URL link preview — a chat message with subtype `url` (or any chat that
+  // carries title/matchedText). Same `type: share` + `attachment` shape
+  // Instagram's XMA cards emit, so Messaging's ShareCard renders without a
+  // per-provider branch. Thumbnail is the in-model JPEG base64 (not the
+  // encrypted MMS payload) — expose as a data URL for the <img>.
+  if (out.type === 'chat') {
+    const title = str(m.__x_title) || str(m.title);
+    const matched = str(m.__x_matchedText) || str(m.matchedText);
+    const desc = str(m.__x_description) || str(m.description);
+    const thumb = str(m.__x_thumbnail) || str(m.thumbnail);
+    const canon = str(m.__x_canonicalUrl) || str(m.canonicalUrl);
+    if (title || matched) {
+      out.type = 'share';
+      const att = { kind: 'link' };
+      if (title) att.title = title;
+      if (desc) att.subtitle = desc;
+      const target = matched || canon;
+      if (target) {
+        att.targetUrl = target;
+        try {
+          const host = new URL(target).hostname.replace(/^www\\./, '');
+          if (host) att.eyebrow = host;
+        } catch (e) {}
+      }
+      if (thumb) att.previewUrl = 'data:image/jpeg;base64,' + thumb;
+      out.attachment = att;
+    }
+  }
   // Quoted/reply parent — WhatsApp stores the stanza id on the child and
   // resolves the parent via WAWebQuotedMsgModelUtils. Same shape Instagram/
   // iMessage already emit (`replyTo {id, author, snippet, isOutgoing}`), so
@@ -294,7 +339,7 @@ const mapMsg = (m) => {
       const qOut = q.__x_id?.fromMe === true;
       const qBody = q.__x_type === 'chat' ? str(q.__x_body) : str(q.__x_caption);
       out.replyTo = {
-        id: q.__x_id?._serialized || '',
+        id: msgId(q),
         isOutgoing: qOut,
         snippet: (qBody || '').slice(0, 120),
       };
@@ -337,13 +382,13 @@ const statusAuthor = (authorJid) => {
   return { name, contact };
 };
 const mapStatusPost = (m, status) => {
-  const id = m.id?._serialized || m.__x_id?._serialized || '';
+  const id = msgId(m);
   const t = Number.isFinite(m.t) ? m.t : (Number.isFinite(m.__x_t) ? m.__x_t : null);
   const type = str(m.type) || str(m.__x_type) || 'chat';
   // Media: body is the preview thumb — caption (or chat body) is the text.
   const content = type === 'chat' ? str(m.body ?? m.__x_body) : str(m.caption ?? m.__x_caption);
-  const authorJid = status?.id?._serialized || status?.__x_id?._serialized
-    || m.author?._serialized || m.__x_author?._serialized || '';
+  const authorJid = keyStr(status?.id || status?.__x_id)
+    || keyStr(m.author || m.__x_author) || '';
   const { name: authorName, contact } = statusAuthor(authorJid);
   const isOutgoing = m.id?.fromMe === true || m.__x_id?.fromMe === true;
   const out = {
@@ -400,8 +445,10 @@ const attachReactions = async (mapped, reactedIds) => {
   const byParent = new Map();
   for (const r of rows) {
     const emoji = str(r.reactionText);
+    // orphan is 0/false when live; a truthy non-zero marks a removed reaction.
     if (!emoji || r.orphan) continue;
-    const pk = str(r.parentMsgKey);
+    const pk = keyStr(r.parentMsgKey);
+    if (!pk) continue;
     if (!byParent.has(pk)) byParent.set(pk, new Map());
     const agg = byParent.get(pk);
     const key = norm(emoji);
@@ -450,7 +497,7 @@ const awaitSend = async (sendPromise, chat, key) => {
     let connRef = null, socketState = null;
     try { connRef = !!window.require('WAWebConnModel').Conn?.ref; } catch (e) {}
     try { socketState = String(window.require('WAWebSocketModel').Socket?.state ?? null); } catch (e) {}
-    const msg = chat.msgs.getModelsArray().find(m => m.__x_id?._serialized === key._serialized);
+    const msg = chat.msgs.getModelsArray().find(m => msgId(m) === keyStr(key));
     const ack = msg && Number.isInteger(msg.__x_ack) ? msg.__x_ack : null;
     return { __error: 'send_failed', what:
       `the send promise did not settle within 15s — the message is parked at ` +
@@ -943,7 +990,7 @@ async def list_messages(*, conversation_id=None, is_unread=None, limit=200, **pa
         // carry any, merged onto the mapped rows as reactions[].
         const reactedIds = models
           .filter(m => m.__x_hasReaction === true)
-          .map(m => m.__x_id?._serialized)
+          .map(msgId)
           .filter(Boolean);
         await attachReactions(mapped, reactedIds);
         return mapped;
@@ -1223,7 +1270,7 @@ async def send_message(*, to, text, reply_to=None, **params):
     let quoted = {{}};
     if (replyTo) {{
       const parent = chat.msgs.getModelsArray()
-        .find(m => m.__x_id?._serialized === replyTo)
+        .find(m => msgId(m) === replyTo)
         || Msg.get(replyTo)
         || (await window.require('WAWebCollections').Msg.getMessagesById([replyTo]))?.messages?.[0];
       if (!parent) return {{ __error: 'not_found', what: 'message', ref: replyTo }};
@@ -1255,10 +1302,10 @@ async def send_message(*, to, text, reply_to=None, **params):
     if (failed) return failed;
     // The tuple's msg element is a detached husk; the live model lands in
     // the chat's own collection under the key we minted.
-    const sent = chat.msgs.getModelsArray().find(m => m.__x_id?._serialized === key._serialized);
+    const sent = chat.msgs.getModelsArray().find(m => msgId(m) === keyStr(key));
     if (sent) return mapMsg(sent);
     return {{
-      id: key._serialized,
+      id: keyStr(key),
       content: {json.dumps(text)},
       published: new Date().toISOString(),
       conversationId: chat.__x_id._serialized,
@@ -1408,10 +1455,10 @@ async def send_media(*, to, path=None, bytes=None, filename=None, caption=None, 
     }});
     const failed = await awaitSend(sendPromise, chat, key);
     if (failed) return failed;
-    const sent = chat.msgs.getModelsArray().find(m => m.__x_id?._serialized === key._serialized);
+    const sent = chat.msgs.getModelsArray().find(m => msgId(m) === keyStr(key));
     if (sent) return mapMsg(sent);
     return {{
-      id: key._serialized,
+      id: keyStr(key),
       content: {json.dumps(caption or "")},
       published: new Date().toISOString(),
       conversationId: chat.__x_id._serialized,
@@ -1550,9 +1597,9 @@ async def send_reaction(*, emoji, chat=None, message_id=None, **params):
     // first and search its own collection (authoritative; the global
     // Msg one only sees loaded/synced messages), then fall back to it.
     const key = window.require('WAWebMsgKey').fromString({json.dumps(message_id)});
-    const target = Chat.get(key.remote?._serialized) || null;
+    const target = Chat.get(keyStr(key.remote)) || null;
     const msg = (target?.msgs.getModelsArray()
-      .find(m => m.__x_id?._serialized === {json.dumps(message_id)}))
+      .find(m => msgId(m) === {json.dumps(message_id)}))
       || Msg.get({json.dumps(message_id)});
     if (!msg) return {{ __error: 'not_found', what: 'message', ref: {json.dumps(message_id)} }};
     """
@@ -1571,11 +1618,11 @@ async def send_reaction(*, emoji, chat=None, message_id=None, **params):
     const {{ sendReactionToMsg }} = window.require('WAWebSendReactionMsgAction');
     await sendReactionToMsg(msg, {json.dumps(emoji)});
     const chatModel = typeof target !== 'undefined' && target
-      ? target : Chat.get(msg.__x_id?.remote?._serialized);
+      ? target : Chat.get(keyStr(msg.__x_id?.remote));
     return {{
       status: 'dispatched',
       reactedTo: msgBody(msg).substring(0, 80),
-      messageId: msg.__x_id?._serialized || '',
+      messageId: msgId(msg),
       conversationName: chatModel ? chatName(chatModel) : '',
     }};
     """)

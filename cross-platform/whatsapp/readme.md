@@ -111,6 +111,15 @@ Every op that takes a chat accepts a JID **or a fuzzy name substring**
   pull its payload. Payloads over 10MB stay un-hydrated (the bytes cross
   the eval channel as one base64 JSON value; the worker caps a line at
   16MB).
+- **URL link previews** (a chat message with `title` / `matchedText` /
+  `thumbnail`) map to `type: share` + `attachment {kind:'link', title,
+  subtitle, targetUrl, previewUrl, eyebrow}` — the shared Messaging share
+  contract (see system doc `messaging-shares`; same shape Instagram's XMA
+  cards emit). The JPEG thumb is the in-model base64 (`thumbnail`), exposed
+  as a `data:` URL (not the encrypted MMS payload).
+- Received **reactions** ride on `reactions: [{emoji, count}]` after a
+  batched `WAWebDBGetReactions.getAllReactionsFromParentMsgs` pass on
+  messages with `__x_hasReaction === true`.
 - Meta AI responses (`rich_response` type) have their text extracted from
   response fragments automatically.
 - `send_message` returns the sent message entity (same shape as
@@ -220,6 +229,12 @@ Drift traps already survived (patterns to keep):
   conflated "no me-user" with "logged out"). The prelude now separates
   them: QR on screen → `NeedsAuth`; live Store with no me-user →
   `BindingDrift`, loud.
+- **MsgKey lost its own `_serialized` data property (~2026-07)** — Chat
+  WIDs still carry `_serialized`, but message keys only serialize via
+  `toString()` (same `false_<remote>_<id>_<participant>` shape). Reading
+  `msg.__x_id._serialized` returned `undefined` → every mapped message
+  id was `""`, so `get_message` media hydration and reaction attach both
+  silently no-oped. Helpers: `keyStr(k)` / `msgId(m)`.
 - **Unset model fields are truthy sentinel objects**
   (`{sentinel: 'DEFAULT VALUE PLACEHOLDER'}`), not undefined. Never branch
   on truthiness — the helpers' `str()` / `Number.isFinite` / `=== true`

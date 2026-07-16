@@ -407,7 +407,9 @@ cumulative cap. Needs the `blobs` + `http` services (frontmatter).
 
 `mapMsg` output additions (set only when present): `type`
 (`text`/`share`/`video`/`image`/`audio`/`animated`/`system`), `attachment {kind,
-title,subtitle,eyebrow,targetUrl,previewUrl}`, `media [{type,url,previewUrl,width,
+title,subtitle,eyebrow,targetUrl,previewUrl}` — the shared Messaging share
+contract (system doc `messaging-shares`; XMA subtypes stay as non-`link`
+`kind` values → outside-bubble rich share), `media [{type,url,previewUrl,width,
 height,durationMs}]`, `replyTo {id,author,snippet,isOutgoing}`, `reactions
 [{emoji,count}]`, `isViewOnce`, `viewExpiresAt`/`expiresAt`, and flags
 `isForwarded`/`isPinned`/`isAiGenerated`/`isDeleted`/`isEdited`.

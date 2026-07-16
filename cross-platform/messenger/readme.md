@@ -148,7 +148,9 @@ decode is unaffected (it never touches the DB).
    read path is implemented (`require('MAWDbObjEncryption').decryptDbObj`, see
    above) and verified end-to-end via direct CDP. Remaining polish: conversation
    NAMES (the `participants` table is empty; 1:1 names live in the encrypted
-   `contacts` store — decrypt it the same way), and XMA/media payload mapping.
+   `contacts` store — decrypt it the same way), and XMA/media payload mapping
+   (flatten into the shared Messaging share contract — system doc
+   `messaging-shares`; URL previews → `kind:'link'`, rich posts → other/omit).
 3. **Engine worker-eval transport — solved.** `browser.targets` reports every
    worker's id/type/title/url, bounded `1+1` liveness, and optional behavior
    probe. Messenger resolves `worker:MAWMainV4WebWorkerBundle?probe=…` by title
