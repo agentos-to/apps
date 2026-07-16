@@ -11,6 +11,7 @@ connection(
 
 connection(
     'code',
+    domain='anthropic.com',
     description="Claude Code — local CLI, uses the user's existing auth (no API key)")
 
 connection(

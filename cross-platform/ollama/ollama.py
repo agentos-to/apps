@@ -23,6 +23,7 @@ from agentos import account, connection, provides, returns, shell, test, timeout
 connection(
     'api',
     description='Ollama REST API — fast inference path, requires server to be running',
+    domain='localhost',
     base_url='http://localhost:11434')
 
 connection(

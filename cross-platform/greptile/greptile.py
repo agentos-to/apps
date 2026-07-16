@@ -290,6 +290,10 @@ async def _resolve_tenant_id(tenant_id: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="greptile.com")
+
 @account.check
 @test
 @returns("account")

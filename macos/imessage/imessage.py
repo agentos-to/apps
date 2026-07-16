@@ -208,6 +208,7 @@ async def _attach_faces(convs):
 
 connection(
     'db',
+    domain='imessage',
     sqlite='~/Library/Messages/chat.db')
 
 

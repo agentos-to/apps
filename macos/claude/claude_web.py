@@ -357,6 +357,10 @@ async def _account_from_orgs() -> dict | None:
     }
 
 
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="claude.ai")
+
 @account.check
 @test.skip(reason='requires a live browser session')
 @returns("account")

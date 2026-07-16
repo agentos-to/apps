@@ -180,6 +180,10 @@ async def _get_json(path: str, params: dict | None = None):
 # `data.name`, so a present username means the session will work.
 
 
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="reddit.com")
+
 @account.check
 @returns("account")
 @connection("none")

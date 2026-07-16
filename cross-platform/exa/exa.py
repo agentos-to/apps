@@ -505,6 +505,10 @@ def _account_from_session(session: dict) -> dict:
     }
 
 
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="exa.ai")
+
 @account.check
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("account")

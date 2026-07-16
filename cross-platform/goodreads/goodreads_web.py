@@ -181,6 +181,10 @@ _GOODREADS = {"shape": "organization", "url": "https://goodreads.com", "name": "
 
 
 @test.skip(reason='destructive or unsupported — migrated from yaml')
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="goodreads.com")
+
 @account.check
 @returns("account")
 @claims("primary_user")

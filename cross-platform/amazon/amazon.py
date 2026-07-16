@@ -1934,6 +1934,10 @@ def _needs_auth():
     )
 
 
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="amazon.com")
+
 @account.check
 @test.skip(reason='destructive or unsupported — migrated from yaml')
 @returns("account")

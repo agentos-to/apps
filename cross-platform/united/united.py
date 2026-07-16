@@ -507,6 +507,10 @@ async def _live_account() -> dict | None:
     return _account_from_profile((resp.get("json") or {}).get("data") or {})
 
 
+
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="united.com")
+
 @account.check
 @test.skip(reason='requires a live united.com session in the browser profile')
 @returns("account")

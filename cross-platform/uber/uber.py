@@ -121,6 +121,9 @@ from lib.shape import (
     _summary_from_checkout_info,
 )
 
+# Browser-session identity namespace — ops bind @connection("none").
+connection("none", domain="uber.com")
+
 # ---------------------------------------------------------------------------
 # Tools + remaining Eats cart/store helpers (page SDK owns RPC; Python shapes)
 # ---------------------------------------------------------------------------
